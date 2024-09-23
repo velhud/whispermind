@@ -1,3 +1,5 @@
 wmenv/
 
 .env
+
+transcriptions.txt
