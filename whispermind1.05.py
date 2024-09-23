@@ -317,103 +317,113 @@ def initialize_layout():
 
     result_text1.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=10)
     scrollbar1.grid(row=1, column=0, sticky="nse", pady=10)
+    
     result_text2.grid(row=1, column=1, sticky="nsew", padx=5, pady=10)
     scrollbar2.grid(row=1, column=1, sticky="nse", pady=10)
+    
     result_text3.grid(row=1, column=2, sticky="nsew", padx=(5, 10), pady=10)
     scrollbar3.grid(row=1, column=2, sticky="nse", pady=10)
     
     if show_properties_var.get():
-        controls_frame.grid(row=2, column=0, columnspan=3, pady=10)
+        controls_frame.grid(row=2, column=0, columnspan=3, pady=10, sticky="ew")
     else:
         controls_frame.grid_remove()
     
-    # Add controls to the frame
-    record_period_label = tk.Label(controls_frame, text="Recording period (seconds):", font=("Helvetica", 12))
-    record_period_label.grid(row=0, column=0, padx=5, pady=5)
+    # Create subframes for better organization
+    # 1. Recording Controls
+    recording_frame = tk.LabelFrame(controls_frame, text="Recording Controls", padx=5, pady=5)
+    recording_frame.grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
-    record_period_entry = tk.Entry(controls_frame, font=("Helvetica", 12))
-    record_period_entry.grid(row=0, column=1, padx=5, pady=5)
+    record_period_label = tk.Label(recording_frame, text="Period (sec):", font=("Helvetica", 12))
+    record_period_label.grid(row=0, column=0, padx=5, pady=2, sticky="w")
+
+    record_period_entry = tk.Entry(recording_frame, font=("Helvetica", 12), width=10)
+    record_period_entry.grid(row=0, column=1, padx=5, pady=2)
     record_period_entry.insert(0, "5")
 
-    auto_scroll_checkbox = tk.Checkbutton(controls_frame, text="Auto-scroll", variable=auto_scroll_var)
-    auto_scroll_checkbox.grid(row=1, column=0, padx=5, pady=5)
+    auto_scroll_checkbox = tk.Checkbutton(recording_frame, text="Auto-scroll", variable=auto_scroll_var)
+    auto_scroll_checkbox.grid(row=0, column=2, padx=5, pady=2)
 
-    timestamp_mode_checkbox = tk.Checkbutton(controls_frame, text="Timestamp every minute", variable=timestamp_mode_var)
-    timestamp_mode_checkbox.grid(row=1, column=1, padx=5, pady=5)
+    timestamp_mode_checkbox = tk.Checkbutton(recording_frame, text="Timestamp every minute", variable=timestamp_mode_var)
+    timestamp_mode_checkbox.grid(row=0, column=3, padx=5, pady=2)
 
-    show_original_checkbox = tk.Checkbutton(controls_frame, text="Show Original", variable=show_original_var, command=update_layout)
-    show_original_checkbox.grid(row=2, column=0, padx=5, pady=5)
+    # 2. Display Options
+    display_frame = tk.LabelFrame(controls_frame, text="Display Options", padx=5, pady=5)
+    display_frame.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-    show_suggestions_checkbox = tk.Checkbutton(controls_frame, text="Show Suggestions", variable=show_suggestions_var, command=update_layout)
-    show_suggestions_checkbox.grid(row=2, column=1, padx=5, pady=5)
+    show_original_checkbox = tk.Checkbutton(display_frame, text="Show Original", variable=show_original_var, command=update_layout)
+    show_original_checkbox.grid(row=0, column=0, padx=5, pady=2)
 
-    # **Add Language Selection Dropdown**
-    translit_label = tk.Label(controls_frame, text="Transliteration Language:", font=("Helvetica", 12))
-    translit_label.grid(row=3, column=0, padx=5, pady=5)
+    show_suggestions_checkbox = tk.Checkbutton(display_frame, text="Show Suggestions", variable=show_suggestions_var, command=update_layout)
+    show_suggestions_checkbox.grid(row=0, column=1, padx=5, pady=2)
+
+    # 3. Language Options
+    language_frame = tk.LabelFrame(controls_frame, text="Language Settings", padx=5, pady=5)
+    language_frame.grid(row=0, column=2, padx=5, pady=5, sticky="w")
+
+    translit_label = tk.Label(language_frame, text="Transliteration:", font=("Helvetica", 12))
+    translit_label.grid(row=0, column=0, padx=5, pady=2, sticky="e")
 
     translit_options = ['Russian', 'Spanish', 'French', 'German', 'Chinese']  # Add more languages as needed
-    translit_dropdown = tk.OptionMenu(controls_frame, transliteration_language_var, *translit_options)
-    translit_dropdown.grid(row=3, column=1, padx=5, pady=5)
+    translit_dropdown = tk.OptionMenu(language_frame, transliteration_language_var, *translit_options)
+    translit_dropdown.grid(row=0, column=1, padx=5, pady=2)
 
-    # **Add UI Translation Options**
-    translation_label = tk.Label(controls_frame, text="Translate To:", font=("Helvetica", 12))
-    translation_label.grid(row=4, column=0, padx=5, pady=5)
+    translation_label = tk.Label(language_frame, text="Translate To:", font=("Helvetica", 12))
+    translation_label.grid(row=1, column=0, padx=5, pady=2, sticky="e")
 
     translation_options = ['English', 'Spanish', 'French', 'German', 'Chinese']  # Add more languages as needed
-    translation_dropdown = tk.OptionMenu(controls_frame, translation_language_var, *translation_options)
-    translation_dropdown.grid(row=4, column=1, padx=5, pady=5)
+    translation_dropdown = tk.OptionMenu(language_frame, translation_language_var, *translation_options)
+    translation_dropdown.grid(row=1, column=1, padx=5, pady=2)
 
-    # **Personal Information Inputs**
-    personal_info_label = tk.Label(controls_frame, text="Personal Info:", font=("Helvetica", 12, "bold"))
-    personal_info_label.grid(row=5, column=0, padx=5, pady=(15, 5), columnspan=2)
+    # 4. Personal Information Inputs (Horizontal Layout)
+    personal_info_frame = tk.LabelFrame(controls_frame, text="Personal Information", padx=5, pady=5)
+    personal_info_frame.grid(row=1, column=0, columnspan=6, padx=5, pady=(10,5), sticky="w")
 
-    # Example fields
-    name_label = tk.Label(controls_frame, text="Name:", font=("Helvetica", 12))
-    name_label.grid(row=6, column=0, padx=5, pady=5)
-    name_entry = tk.Entry(controls_frame, font=("Helvetica", 12))
-    name_entry.grid(row=6, column=1, padx=5, pady=5)
+    name_label = tk.Label(personal_info_frame, text="Name:", font=("Helvetica", 12))
+    name_label.grid(row=0, column=0, padx=5, pady=2, sticky="e")
+    name_entry = tk.Entry(personal_info_frame, font=("Helvetica", 12), width=15)
+    name_entry.grid(row=0, column=1, padx=5, pady=2)
     personal_info_entries['name'] = name_entry
 
-    goal_label = tk.Label(controls_frame, text="Conversation Goal:", font=("Helvetica", 12))
-    goal_label.grid(row=7, column=0, padx=5, pady=5)
-    goal_entry = tk.Entry(controls_frame, font=("Helvetica", 12))
-    goal_entry.grid(row=7, column=1, padx=5, pady=5)
+    goal_label = tk.Label(personal_info_frame, text="Goal:", font=("Helvetica", 12))
+    goal_label.grid(row=0, column=2, padx=5, pady=2, sticky="e")
+    goal_entry = tk.Entry(personal_info_frame, font=("Helvetica", 12), width=15)
+    goal_entry.grid(row=0, column=3, padx=5, pady=2)
     personal_info_entries['goal'] = goal_entry
 
-    style_label = tk.Label(controls_frame, text="Preferred Style:", font=("Helvetica", 12))
-    style_label.grid(row=8, column=0, padx=5, pady=5)
-    style_entry = tk.Entry(controls_frame, font=("Helvetica", 12))
-    style_entry.grid(row=8, column=1, padx=5, pady=5)
+    style_label = tk.Label(personal_info_frame, text="Style:", font=("Helvetica", 12))
+    style_label.grid(row=0, column=4, padx=5, pady=2, sticky="e")
+    style_entry = tk.Entry(personal_info_frame, font=("Helvetica", 12), width=15)
+    style_entry.grid(row=0, column=5, padx=5, pady=2)
     personal_info_entries['style'] = style_entry
 
-    length_label = tk.Label(controls_frame, text="Preferred Length:", font=("Helvetica", 12))
-    length_label.grid(row=9, column=0, padx=5, pady=5)
-    length_entry = tk.Entry(controls_frame, font=("Helvetica", 12))
-    length_entry.grid(row=9, column=1, padx=5, pady=5)
+    length_label = tk.Label(personal_info_frame, text="Length:", font=("Helvetica", 12))
+    length_label.grid(row=0, column=6, padx=5, pady=2, sticky="e")
+    length_entry = tk.Entry(personal_info_frame, font=("Helvetica", 12), width=15)
+    length_entry.grid(row=0, column=7, padx=5, pady=2)
     personal_info_entries['length'] = length_entry
 
-    button_frame = tk.Frame(controls_frame)
-    button_frame.grid(row=10, column=0, columnspan=2, padx=5, pady=5)
 
-    transcribe_button = tk.Button(button_frame, text="Transcribe File", command=transcribe_file)
-    transcribe_button.pack(side=tk.LEFT, padx=5)
+    # 5 & 6. Action and Settings Buttons (Square Layout)
+    buttons_frame = tk.Frame(controls_frame)
+    buttons_frame.grid(row=2, column=5, padx=5, pady=5, sticky="e")
 
-    clear_button = tk.Button(button_frame, text="Clear Text", command=clear_text_boxes)
-    clear_button.pack(side=tk.LEFT, padx=5)
+    transcribe_button = tk.Button(buttons_frame, text="Transcribe File", command=transcribe_file, width=15)
+    transcribe_button.grid(row=0, column=0, padx=5, pady=5)
 
-    # **Add Save and Load Settings Buttons**
-    settings_button_frame = tk.Frame(controls_frame)
-    settings_button_frame.grid(row=11, column=0, columnspan=2, padx=5, pady=5)
+    clear_button = tk.Button(buttons_frame, text="Clear Text", command=clear_text_boxes, width=15)
+    clear_button.grid(row=0, column=1, padx=5, pady=5)
 
-    save_settings_button = tk.Button(settings_button_frame, text="Save Settings", command=save_settings)
-    save_settings_button.pack(side=tk.LEFT, padx=5)
+    save_settings_button = tk.Button(buttons_frame, text="Save Settings", command=save_settings, width=15)
+    save_settings_button.grid(row=1, column=0, padx=5, pady=5)
 
-    load_settings_button = tk.Button(settings_button_frame, text="Load Settings", command=load_settings)
-    load_settings_button.pack(side=tk.LEFT, padx=5)
+    load_settings_button = tk.Button(buttons_frame, text="Load Settings", command=load_settings, width=15)
+    load_settings_button.grid(row=1, column=1, padx=5, pady=5)
 
 
     # Bind the space key event to the aggregate_transcription_text function
     root.bind('<space>', on_space_press)
+
 
 def update_gui(original_text, translated_text, suggestion_text, timestamp):
     if timestamp:
@@ -570,7 +580,6 @@ translation_language_var = tk.StringVar(value='English')  # Default to English
 # Dictionary to store personal info entries
 personal_info_entries = {}
 
-
 root.grid_columnconfigure(0, weight=1)
 root.grid_columnconfigure(1, weight=1)
 root.grid_columnconfigure(2, weight=1)
@@ -610,6 +619,9 @@ result_text3.insert(tk.END, "Press space to see Claude suggestions")
 
 # Controls frame
 controls_frame = tk.Frame(root)
+
+separator = tk.Frame(controls_frame, height=2, bd=1, relief=tk.SUNKEN)
+separator.grid(row=1, column=0, columnspan=6, padx=5, pady=5, sticky="ew")
 
 # After creating text boxes and scrollbars
 initialize_layout()
