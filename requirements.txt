@@ -1,0 +1,4 @@
+pyaudio
+groq
+python-dotenv
+anthropic
