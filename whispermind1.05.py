@@ -12,6 +12,33 @@ import io
 import anthropic
 import json
 
+def _anthropic_content_to_text(content):
+    """Best-effort conversion of Anthropic message.content to a plain string.
+
+    Anthropic SDK returns a list of content blocks (e.g., TextBlock objects).
+    This helper extracts the text from each block and concatenates them.
+    """
+    try:
+        # If content is already a string, normalize and return
+        if isinstance(content, str):
+            return content.strip()
+
+        parts = []
+        for block in content or []:
+            # Support both dict-like blocks and SDK objects with a .text attribute
+            if isinstance(block, dict):
+                text = block.get("text") or block.get("content") or ""
+                if text:
+                    parts.append(str(text))
+            else:
+                text = getattr(block, "text", None)
+                parts.append(text if text is not None else str(block))
+
+        return "".join(parts).strip()
+    except Exception:
+        # Fall back to string repr if structure is unexpected
+        return str(content)
+
 class LayoutState:
     def __init__(self):
         self.show_original = True
@@ -24,6 +51,9 @@ class LayoutState:
 layout_state = LayoutState()
 
 transcription_texts = []
+
+# Thread-safe bridge from worker threads to Tk main thread
+ui_queue = queue.Queue()
 
 # Replace this section
 load_dotenv()
@@ -94,7 +124,7 @@ def save_to_file(text, timestamp):
 
 def translate_text(text, target_language='English'):
     completion = groq_client.chat.completions.create(
-        model="llama3-70b-8192",
+        model="llama-3.3-70b-versatile",
         messages=[
             {
                 "role": "system",
@@ -146,9 +176,10 @@ def process_with_claude_sonnet(text):
                 }
             ]
         )
-        # Print the response from the first Claude model
-        print(f"Claude Sonnet Response (Suggestions): {message.content}")
-        return message.content
+        # Normalize Anthropic response to a plain string
+        suggestions_text = _anthropic_content_to_text(message.content)
+        print(f"Claude Sonnet Response (Suggestions): {suggestions_text}")
+        return suggestions_text
     except Exception as e:
         print(f"Error processing with Claude Sonnet: {e}")
         return f"Error processing with Claude Sonnet: {e}"
@@ -159,6 +190,9 @@ def process_sonnet_response(sonnet_response):
         target_language = transliteration_language_var.get()
         system_prompt = f"You are a professional transliterator of text. Identify the language of the text that you received and transliterate it to {target_language} in such a way that if {target_language} letters are pronounced by a {target_language.lower()} speaker, they will mimic as close as possible the pronunciation of the original text. In your response, return only the transliterated text and no other additional comments. Do not pay any attention to the content and meaning of the information you received; your job is only to do transliteration. Here is the text:"
 
+        # Ensure the input to Anthropic is a string
+        input_text = _anthropic_content_to_text(sonnet_response)
+
         message = anthropic_client.messages.create(
             model="claude-3-5-sonnet-20240620",
             max_tokens=4000,
@@ -167,13 +201,14 @@ def process_sonnet_response(sonnet_response):
             messages=[
                 {
                     "role": "user",
-                    "content": sonnet_response
+                    "content": input_text
                 }
             ]
         )
-        # Print the response from the second Claude model (Transliteration)
-        print(f"Sonnet Transliteration Response ({target_language}): {message.content}")
-        return message.content
+        # Normalize Anthropic response to a plain string
+        translit_text = _anthropic_content_to_text(message.content)
+        print(f"Sonnet Transliteration Response ({target_language}): {translit_text}")
+        return translit_text
     except Exception as e:
         print(f"Error processing Sonnet response: {e}")
         return f"Error processing Sonnet response: {e}"
@@ -202,7 +237,7 @@ def listen():
     audio.terminate()
 
 def process_audio():
-    global buffer, audio_data_available, recording_start_time, is_recording, record_period_entry
+    global buffer, audio_data_available, recording_start_time, is_recording
 
     overlap_seconds = 0.5
     overlap_frames = int(RATE / CHUNK * overlap_seconds)
@@ -210,10 +245,10 @@ def process_audio():
     last_minute_timestamp = None
 
     while is_recording and not stop_event.is_set():
+        # Read config captured from Tk via traced variables (thread-safe)
         try:
-            record_seconds = int(record_period_entry.get())
-        except ValueError:
-            print("Invalid recording period. Using default 5 seconds.")
+            record_seconds = int(record_period_value)
+        except Exception:
             record_seconds = 5
 
         frames = []
@@ -239,7 +274,8 @@ def process_audio():
             wav_buffer = io.BytesIO()
             with wave.open(wav_buffer, 'wb') as wf:
                 wf.setnchannels(CHANNELS)
-                wf.setsampwidth(audio.get_sample_size(FORMAT))
+                # 16-bit samples -> 2 bytes per sample; avoid dependency on 'audio' global
+                wf.setsampwidth(2)
                 wf.setframerate(RATE)
                 wf.writeframes(audio_data)
             
@@ -247,25 +283,26 @@ def process_audio():
 
             try:
                 transcription = groq_client.audio.transcriptions.create(
-                    file=("audio.wav", wav_buffer),
+                    # Pass raw bytes to avoid issues with file-like objects
+                    file=("audio.wav", wav_buffer.getvalue()),
                     model="whisper-large-v3",
                     response_format="verbose_json",
                 )
                 transcription_text = transcription.text
 
-                translated_text = translate_text(transcription_text, translation_language_var.get())
+                translated_text = translate_text(transcription_text, translation_language_value)
 
-                if timestamp_mode_var.get():
+                if timestamp_mode_value:
                     current_minute = chunk_start_time.replace(second=0, microsecond=0)
                     if current_minute != last_minute_timestamp:
                         last_minute_timestamp = current_minute
-                        root.after(0, update_gui, transcription_text, translated_text, current_minute)
+                        ui_queue.put(("update_gui", (transcription_text, translated_text, current_minute)))
                         save_to_file(transcription_text, current_minute)
                     else:
-                        root.after(0, update_gui, transcription_text, translated_text, None)
+                        ui_queue.put(("update_gui", (transcription_text, translated_text, None)))
                         save_to_file(transcription_text, None)
                 else:
-                    root.after(0, update_gui, transcription_text, translated_text, chunk_start_time)
+                    ui_queue.put(("update_gui", (transcription_text, translated_text, chunk_start_time)))
                     save_to_file(transcription_text, chunk_start_time)
 
                 # Add the transcription text to the global list
@@ -273,7 +310,7 @@ def process_audio():
 
             except Exception as e:
                 print(f"Error during transcription: {e}")
-                root.after(0, update_gui, f"Error: {e}", "", chunk_start_time)
+                ui_queue.put(("update_gui", (f"Error: {e}", "", chunk_start_time)))
 
 # Update the update_layout function
 def update_layout():
@@ -331,9 +368,8 @@ def initialize_layout():
     record_period_label = tk.Label(recording_frame, text="Period (sec):", font=("Helvetica", 12))
     record_period_label.grid(row=0, column=0, padx=5, pady=2, sticky="w")
 
-    record_period_entry = tk.Entry(recording_frame, font=("Helvetica", 12), width=10)
+    record_period_entry = tk.Entry(recording_frame, font=("Helvetica", 12), width=10, textvariable=record_period_var)
     record_period_entry.grid(row=0, column=1, padx=5, pady=2)
-    record_period_entry.insert(0, "5")
 
     auto_scroll_checkbox = tk.Checkbutton(recording_frame, text="Auto-scroll", variable=auto_scroll_var)
     auto_scroll_checkbox.grid(row=0, column=2, padx=5, pady=2)
@@ -466,11 +502,14 @@ def transcribe_file():
             )
         transcription_text = transcription.text
 
-        with open("transcription_from_file.txt", "w") as f:
+        with open("transcription_from_file.txt", "w", encoding="utf-8") as f:
             f.write(transcription_text)
 
         translated_result = translate_text(transcription_text, translation_language_var.get())
-        update_gui(transcription_text, translated_result, datetime.datetime.now())
+        ts_now = datetime.datetime.now()
+        update_gui(transcription_text, translated_result, ts_now)
+        # Keep suggestions consistent by including file transcriptions
+        transcription_texts.append((ts_now, transcription_text))
 
 def toggle_recording_key(event):
     toggle_recording()
@@ -567,6 +606,40 @@ timestamp_mode_var = tk.BooleanVar(value=False)
 transliteration_language_var = tk.StringVar(value='Russian')  # Default to Russian
 translation_language_var = tk.StringVar(value='English')  # Default to English
 
+# Thread-safe mirrors for worker threads
+translation_language_value = translation_language_var.get()
+timestamp_mode_value = bool(timestamp_mode_var.get())
+record_period_value = 5
+record_period_var = tk.StringVar(value='5')
+
+def _on_translation_language_change(*_):
+    global translation_language_value
+    try:
+        translation_language_value = translation_language_var.get()
+    except Exception:
+        pass
+
+def _on_timestamp_mode_change(*_):
+    global timestamp_mode_value
+    try:
+        timestamp_mode_value = bool(timestamp_mode_var.get())
+    except Exception:
+        pass
+
+def _on_record_period_change(*_):
+    global record_period_value
+    try:
+        val = record_period_var.get()
+        record_period_value = int(val)
+    except Exception:
+        # Keep previous valid value if parse fails
+        pass
+
+# Attach traces so the mirrors stay updated
+translation_language_var.trace_add('write', _on_translation_language_change)
+timestamp_mode_var.trace_add('write', _on_timestamp_mode_change)
+record_period_var.trace_add('write', _on_record_period_change)
+
 # Dictionary to store personal info entries
 personal_info_entries = {}
 
@@ -618,6 +691,22 @@ initialize_layout()
 
 # Initialize layout
 update_layout()
+
+# Pump UI actions from worker threads
+def _pump_ui_queue():
+    try:
+        while True:
+            cmd, payload = ui_queue.get_nowait()
+            if cmd == "update_gui":
+                original_text, translated_text, ts = payload
+                update_gui(original_text, translated_text, ts)
+    except Exception:
+        # Queue empty or other benign condition
+        pass
+    finally:
+        root.after(50, _pump_ui_queue)
+
+root.after(50, _pump_ui_queue)
 
 # Set up closing protocol
 root.protocol("WM_DELETE_WINDOW", on_closing)

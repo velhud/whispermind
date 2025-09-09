@@ -9,6 +9,7 @@ WhisperMind is an audio transcription and translation application that utilizes 
 - **Translation**: Translate transcribed text into English using the Groq API.
 - **Suggestions**: Generate conversation suggestions based on the transcribed text using the Claude model.
 - **User Interface**: A simple GUI built with Tkinter for easy interaction.
+- **Export**: Save transcriptions and translations to a Markdown file.
 
 ## Requirements
 
@@ -41,7 +42,7 @@ pip install pyaudio python-dotenv anthropic groq
 3. Run the application:
 
    ```bash
-   python whispermind1.01.py
+   python whispermind.py
    ```
 
 ## Usage
