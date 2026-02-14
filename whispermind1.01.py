@@ -1,4 +1,3 @@
-import asyncio
 import pyaudio
 import wave
 import tkinter as tk
@@ -50,9 +49,6 @@ CHUNK = 1024
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
-RECORD_SECONDS = 5
-OVERLAP = 5
-WAVE_OUTPUT_FILENAME = "audio.wav"
 
 # Global variables
 buffer = queue.Queue()
@@ -116,7 +112,6 @@ def translate_text(text, target_language='en'):
     )
     return completion.choices[0].message.content.strip()
 
-import re
 
 def process_with_claude_sonnet(text):
     try:
@@ -241,13 +236,13 @@ def process_audio():
                     current_minute = chunk_start_time.replace(second=0, microsecond=0)
                     if current_minute != last_minute_timestamp:
                         last_minute_timestamp = current_minute
-                        root.after(0, update_gui, transcription_text, translated_text, "", current_minute)
+                        root.after(0, update_gui, transcription_text, translated_text, current_minute)
                         save_to_file(transcription_text, current_minute)
                     else:
-                        root.after(0, update_gui, transcription_text, translated_text, "", None)
+                        root.after(0, update_gui, transcription_text, translated_text, None)
                         save_to_file(transcription_text, None)
                 else:
-                    root.after(0, update_gui, transcription_text, translated_text, "", chunk_start_time)
+                    root.after(0, update_gui, transcription_text, translated_text, chunk_start_time)
                     save_to_file(transcription_text, chunk_start_time)
 
                 # Add the transcription text to the global list
@@ -255,7 +250,7 @@ def process_audio():
 
             except Exception as e:
                 print(f"Error during transcription: {e}")
-                root.after(0, update_gui, f"Error: {e}", "", "", chunk_start_time)
+                root.after(0, update_gui, f"Error: {e}", "", chunk_start_time)
 
 # Update the update_layout function
 def update_layout():
@@ -332,10 +327,8 @@ def initialize_layout():
     clear_button = tk.Button(button_frame, text="Clear Text", command=clear_text_boxes)
     clear_button.pack(side=tk.LEFT, padx=5)
 
-    # Bind the space key event to the aggregate_transcription_text function
-    root.bind('<space>', on_space_press)
 
-def update_gui(original_text, translated_text, suggestion_text, timestamp):
+def update_gui(original_text, translated_text, timestamp):
     if timestamp:
         formatted_timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         timestamp_text = f"[{formatted_timestamp}] "
@@ -388,7 +381,7 @@ def transcribe_file():
             f.write(transcription_text)
 
         translated_result = translate_text(transcription_text)
-        update_gui(transcription_text, translated_result, "", datetime.datetime.now())
+        update_gui(transcription_text, translated_result, datetime.datetime.now())
 
 def toggle_recording_key(event):
     toggle_recording()

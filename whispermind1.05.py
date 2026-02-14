@@ -1,4 +1,3 @@
-import asyncio
 import pyaudio
 import wave
 import tkinter as tk
@@ -12,7 +11,6 @@ from dotenv import load_dotenv
 import io
 import anthropic
 import json
-import re
 
 class LayoutState:
     def __init__(self):
@@ -52,9 +50,6 @@ CHUNK = 1024
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
-RECORD_SECONDS = 5
-OVERLAP = 5
-WAVE_OUTPUT_FILENAME = "audio.wav"
 
 # Global variables
 buffer = queue.Queue()
@@ -98,7 +93,6 @@ def save_to_file(text, timestamp):
             f.write(f"{text}\n")
 
 def translate_text(text, target_language='English'):
-    target_language = translation_language_var.get()
     completion = groq_client.chat.completions.create(
         model="llama3-70b-8192",
         messages=[
@@ -259,19 +253,19 @@ def process_audio():
                 )
                 transcription_text = transcription.text
 
-                translated_text = translate_text(transcription_text)
+                translated_text = translate_text(transcription_text, translation_language_var.get())
 
                 if timestamp_mode_var.get():
                     current_minute = chunk_start_time.replace(second=0, microsecond=0)
                     if current_minute != last_minute_timestamp:
                         last_minute_timestamp = current_minute
-                        root.after(0, update_gui, transcription_text, translated_text, "", current_minute)
+                        root.after(0, update_gui, transcription_text, translated_text, current_minute)
                         save_to_file(transcription_text, current_minute)
                     else:
-                        root.after(0, update_gui, transcription_text, translated_text, "", None)
+                        root.after(0, update_gui, transcription_text, translated_text, None)
                         save_to_file(transcription_text, None)
                 else:
-                    root.after(0, update_gui, transcription_text, translated_text, "", chunk_start_time)
+                    root.after(0, update_gui, transcription_text, translated_text, chunk_start_time)
                     save_to_file(transcription_text, chunk_start_time)
 
                 # Add the transcription text to the global list
@@ -279,7 +273,7 @@ def process_audio():
 
             except Exception as e:
                 print(f"Error during transcription: {e}")
-                root.after(0, update_gui, f"Error: {e}", "", "", chunk_start_time)
+                root.after(0, update_gui, f"Error: {e}", "", chunk_start_time)
 
 # Update the update_layout function
 def update_layout():
@@ -421,11 +415,9 @@ def initialize_layout():
     load_settings_button.grid(row=1, column=1, padx=5, pady=5)
 
 
-    # Bind the space key event to the aggregate_transcription_text function
-    root.bind('<space>', on_space_press)
 
 
-def update_gui(original_text, translated_text, suggestion_text, timestamp):
+def update_gui(original_text, translated_text, timestamp):
     if timestamp:
         formatted_timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         timestamp_text = f"[{formatted_timestamp}] "
@@ -477,8 +469,8 @@ def transcribe_file():
         with open("transcription_from_file.txt", "w") as f:
             f.write(transcription_text)
 
-        translated_result = translate_text(transcription_text)
-        update_gui(transcription_text, translated_result, "", datetime.datetime.now())
+        translated_result = translate_text(transcription_text, translation_language_var.get())
+        update_gui(transcription_text, translated_result, datetime.datetime.now())
 
 def toggle_recording_key(event):
     toggle_recording()
@@ -515,7 +507,6 @@ def save_settings():
         }
     }
     with open('settings.json', 'w', encoding='utf-8') as f:
-        import json
         json.dump(settings, f, ensure_ascii=False, indent=4)
     print("Settings saved successfully.")
 
@@ -524,7 +515,6 @@ def load_settings():
         print("Settings file not found.")
         return
     with open('settings.json', 'r', encoding='utf-8') as f:
-        import json
         settings = json.load(f)
     
     # Load transliteration and translation languages
