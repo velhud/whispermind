@@ -3,3 +3,5 @@ wmenv/
 __pycache__/
 .gpt_cache/
 transcriptions.txt
+settings.json
+transcription_from_file.txt

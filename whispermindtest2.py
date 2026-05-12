@@ -11,6 +11,7 @@ import io
 import json
 import time
 import re
+import copy
 from typing import List, Dict, Tuple, Optional, Any, Callable
 from groq import Groq
 from openai import OpenAI
@@ -35,6 +36,50 @@ LANGUAGE_CODES = {
     "Italian": "it",
     "Portuguese": "pt",
 }
+
+TRANSLITERATION_LANGUAGES = [
+    "Russian",
+    "Spanish",
+    "French",
+    "German",
+    "Chinese",
+    "Japanese",
+    "Korean",
+    "Arabic",
+]
+
+TEXT_TRANSLATION_LANGUAGES = [
+    "English",
+    "Spanish",
+    "French",
+    "German",
+    "Chinese",
+    "Japanese",
+    "Korean",
+    "Arabic",
+    "Russian",
+    "Italian",
+    "Portuguese",
+    "Hindi",
+    "Indonesian",
+    "Vietnamese",
+]
+
+REALTIME_OUTPUT_LANGUAGES = [
+    "Spanish",
+    "Portuguese",
+    "French",
+    "Japanese",
+    "Russian",
+    "Chinese",
+    "German",
+    "Korean",
+    "Hindi",
+    "Indonesian",
+    "Vietnamese",
+    "Italian",
+    "English",
+]
 
 
 def language_code(language_name):
@@ -86,12 +131,14 @@ class RealtimeTranslationSession:
         ui_delta_updater,
         add_transcription,
         status_callback=None,
+        stop_callback=None,
     ):
         self.api_key = api_key
         self.target_language = target_language
         self.ui_delta_updater = ui_delta_updater
         self.add_transcription = add_transcription
         self.status_callback = status_callback
+        self.stop_callback = stop_callback
         self.ws = None
         self.audio = None
         self.stream = None
@@ -100,6 +147,7 @@ class RealtimeTranslationSession:
         self.receiver_thread = None
         self.source_buffer = ""
         self.source_lock = threading.Lock()
+        self.stop_notified = False
 
     def start(self):
         if self.running:
@@ -128,6 +176,7 @@ class RealtimeTranslationSession:
 
     def stop(self):
         self.running = False
+        self.flush_source_buffer()
         try:
             if self.stream:
                 self.stream.stop_stream()
@@ -144,6 +193,9 @@ class RealtimeTranslationSession:
                 self.ws.close()
         except Exception:
             pass
+        if self.stop_callback and not self.stop_notified:
+            self.stop_notified = True
+            self.stop_callback()
 
     def _send_session_update(self):
         self.ws.send(
@@ -152,6 +204,11 @@ class RealtimeTranslationSession:
                     "type": "session.update",
                     "session": {
                         "audio": {
+                            "input": {
+                                "transcription": {
+                                    "model": "gpt-realtime-whisper",
+                                },
+                            },
                             "output": {
                                 "language": language_code(self.target_language),
                             },
@@ -206,6 +263,8 @@ class RealtimeTranslationSession:
                     message = event.get("error", {}).get("message", event)
                     if self.status_callback:
                         self.status_callback(f"Realtime API error: {message}")
+                    self.stop()
+                    break
         except Exception as e:
             if self.running and self.status_callback:
                 self.status_callback(f"Realtime receive error: {e}")
@@ -228,6 +287,14 @@ class RealtimeTranslationSession:
                 if text:
                     self.add_transcription(datetime.datetime.now(), text)
 
+    def flush_source_buffer(self):
+        """Persist any pending source transcript fragment before shutdown."""
+        with self.source_lock:
+            text = self.source_buffer.strip()
+            self.source_buffer = ""
+        if text:
+            self.add_transcription(datetime.datetime.now(), text)
+
 class AudioRecorder:
     """Handles audio recording and processing."""
     
@@ -237,7 +304,7 @@ class AudioRecorder:
     CHANNELS = 1
     RATE = 16000
     
-    def __init__(self, config_manager, status_callback=None):
+    def __init__(self, config_manager, status_callback=None, state_callback=None):
         """Initialize the audio recorder.
         
         Args:
@@ -246,7 +313,9 @@ class AudioRecorder:
         """
         self.config_manager = config_manager
         self.status_callback = status_callback
+        self.state_callback = state_callback
         self.is_recording = False
+        self.active_backend = None
         self.stop_event = threading.Event()
         self.audio_data_available = threading.Event()
         self.buffer = queue.Queue()
@@ -265,13 +334,20 @@ class AudioRecorder:
             return
 
         if self.config_manager.get_translation_backend() == OPENAI_REALTIME_BACKEND:
-            self.config_manager.transcription_manager.start_realtime_translation(self.status_callback)
+            self.active_backend = OPENAI_REALTIME_BACKEND
+            self.config_manager.transcription_manager.start_realtime_translation(
+                self.status_callback,
+                self._handle_realtime_stopped,
+            )
             self.is_recording = True
+            if self.state_callback:
+                self.state_callback(True)
             if self.status_callback:
                 self.status_callback("Recording with OpenAI realtime translation")
             return
             
         self.is_recording = True
+        self.active_backend = self.config_manager.get_translation_backend()
         self.stop_event.clear()
         self.recording_start_time = datetime.datetime.now()
         self.buffer = queue.Queue()
@@ -286,6 +362,8 @@ class AudioRecorder:
         
         if self.status_callback:
             self.status_callback("Recording started")
+        if self.state_callback:
+            self.state_callback(True)
 
     def stop_recording(self):
         """Stop audio recording and processing."""
@@ -296,11 +374,23 @@ class AudioRecorder:
         self.stop_event.set()
         self.audio_data_available.set()  # Wake up waiting threads
 
-        if self.config_manager.get_translation_backend() == OPENAI_REALTIME_BACKEND:
+        if self.active_backend == OPENAI_REALTIME_BACKEND:
             self.config_manager.transcription_manager.stop_realtime_translation()
+        self.active_backend = None
         
         if self.status_callback:
             self.status_callback("Recording stopped")
+        if self.state_callback:
+            self.state_callback(False)
+
+    def _handle_realtime_stopped(self):
+        """Keep recorder/UI state in sync when realtime ends from an API error."""
+        self.is_recording = False
+        self.active_backend = None
+        if self.state_callback:
+            self.state_callback(False)
+        if self.status_callback:
+            self.status_callback("Realtime session stopped", "orange")
 
     def _listen(self):
         """Record audio and put it in the buffer."""
@@ -324,6 +414,10 @@ class AudioRecorder:
                         self.status_callback(f"Error during recording: {e}")
                     time.sleep(0.1)
         except Exception as e:
+            self.is_recording = False
+            self.stop_event.set()
+            if self.state_callback:
+                self.state_callback(False)
             if self.status_callback:
                 self.status_callback(f"Failed to initialize audio: {e}")
         finally:
@@ -369,8 +463,9 @@ class AudioRecorder:
                     
                     # Send for transcription
                     self.config_manager.transcription_manager.process_audio(
-                        wav_buffer, 
-                        chunk_start_time
+                        wav_buffer,
+                        chunk_start_time,
+                        self.active_backend,
                     )
             except Exception as e:
                 if self.status_callback:
@@ -394,7 +489,7 @@ class AudioRecorder:
 class TranscriptionManager:
     """Manages audio transcription and text processing."""
     
-    def __init__(self, config_manager, ui_updater, realtime_ui_updater=None):
+    def __init__(self, config_manager, ui_updater, realtime_ui_updater=None, status_callback=None):
         """Initialize the transcription manager.
         
         Args:
@@ -404,8 +499,12 @@ class TranscriptionManager:
         self.config_manager = config_manager
         self.ui_updater = ui_updater
         self.realtime_ui_updater = realtime_ui_updater
+        self.status_callback = status_callback
         self.transcription_texts = []
         self.transcription_lock = threading.Lock()
+        self.last_minute_timestamp = None
+        self.audio_worker_lock = threading.Lock()
+        self.file_worker_lock = threading.Lock()
         self.groq_client = None
         self.openai_client = None
         self.anthropic_client = None
@@ -441,7 +540,7 @@ class TranscriptionManager:
         except Exception as e:
             print(f"Error initializing API clients: {e}")
 
-    def start_realtime_translation(self, status_callback=None):
+    def start_realtime_translation(self, status_callback=None, stop_callback=None):
         """Start a dedicated OpenAI realtime translation session."""
         if self.realtime_translation_session:
             return
@@ -456,6 +555,7 @@ class TranscriptionManager:
             ui_delta_updater=self.realtime_ui_updater,
             add_transcription=self.add_transcription,
             status_callback=status_callback,
+            stop_callback=stop_callback,
         )
         self.realtime_translation_session.start()
 
@@ -464,6 +564,12 @@ class TranscriptionManager:
         if self.realtime_translation_session:
             self.realtime_translation_session.stop()
             self.realtime_translation_session = None
+
+    def clear_history(self):
+        """Clear suggestion context and timestamp grouping state."""
+        with self.transcription_lock:
+            self.transcription_texts = []
+        self.last_minute_timestamp = None
 
     def add_transcription(self, timestamp, text):
         """Add a transcription to history with thread safety.
@@ -478,27 +584,40 @@ class TranscriptionManager:
             if len(self.transcription_texts) > max_items:
                 self.transcription_texts = self.transcription_texts[-max_items:]
 
-    def process_audio(self, audio_buffer, timestamp):
+    def process_audio(self, audio_buffer, timestamp, backend=None):
         """Process audio data for transcription.
         
         Args:
             audio_buffer: The audio data buffer
             timestamp: The timestamp of the recording
         """
+        acquired = False
         try:
-            if self.config_manager.get_translation_backend() == OPENAI_CHUNKED_BACKEND:
+            backend = backend or self.config_manager.get_translation_backend()
+            if backend == OPENAI_REALTIME_BACKEND:
+                return
+            if backend == OPENAI_CHUNKED_BACKEND:
                 if not self.openai_client:
                     raise Exception("OpenAI client not initialized")
             elif not self.groq_client:
                 raise Exception("Groq client not initialized")
+
+            acquired = self.audio_worker_lock.acquire(blocking=False)
+            if not acquired:
+                print("Skipping audio chunk because the previous transcription is still running.")
+                if self.status_callback:
+                    self.status_callback("Skipping chunk while previous transcription is still running", "orange")
+                return
                 
             # Use threading to avoid blocking
             threading.Thread(
-                target=self._transcribe_audio,
-                args=(audio_buffer, timestamp),
+                target=self._transcribe_audio_locked,
+                args=(audio_buffer, timestamp, backend),
                 daemon=True
             ).start()
         except Exception as e:
+            if acquired:
+                self.audio_worker_lock.release()
             print(f"Error processing audio: {e}")
             self.ui_updater(f"Error: {e}", "", "", timestamp)
 
@@ -510,23 +629,51 @@ class TranscriptionManager:
             file_data: Raw file data
             timestamp: The timestamp of the transcription request
         """
+        acquired = False
         try:
-            if self.config_manager.get_translation_backend() == OPENAI_CHUNKED_BACKEND:
+            backend = self.config_manager.get_file_backend()
+            if backend == OPENAI_CHUNKED_BACKEND:
                 if not self.openai_client:
                     raise Exception("OpenAI client not initialized")
             elif not self.groq_client:
                 raise Exception("Groq client not initialized")
+
+            acquired = self.file_worker_lock.acquire(blocking=False)
+            if not acquired:
+                raise Exception("Another file transcription is already running")
                 
             threading.Thread(
-                target=self._transcribe_file,
-                args=(file_path, file_data, timestamp),
+                target=self._transcribe_file_locked,
+                args=(file_path, file_data, timestamp, backend),
                 daemon=True
             ).start()
         except Exception as e:
+            if acquired:
+                self.file_worker_lock.release()
             print(f"Error processing file: {e}")
+            if self.status_callback:
+                self.status_callback(f"File transcription failed: {e}", "red")
             self.ui_updater(f"Error: {e}", "", "", timestamp)
 
-    def _transcribe_audio(self, audio_buffer, timestamp):
+    def _transcribe_audio_locked(self, audio_buffer, timestamp, backend):
+        try:
+            self._transcribe_audio(audio_buffer, timestamp, backend)
+        finally:
+            try:
+                self.audio_worker_lock.release()
+            except RuntimeError:
+                pass
+
+    def _transcribe_file_locked(self, file_path, file_data, timestamp, backend):
+        try:
+            self._transcribe_file(file_path, file_data, timestamp, backend)
+        finally:
+            try:
+                self.file_worker_lock.release()
+            except RuntimeError:
+                pass
+
+    def _transcribe_audio(self, audio_buffer, timestamp, backend=None):
         """Transcribe audio data using Whisper API.
         
         Args:
@@ -534,10 +681,11 @@ class TranscriptionManager:
             timestamp: The timestamp of the recording
         """
         try:
-            transcription_text = self.transcribe_audio_buffer(audio_buffer, "audio.wav")
+            backend = backend or self.config_manager.get_translation_backend()
+            transcription_text = self.transcribe_audio_buffer(audio_buffer, "audio.wav", backend)
             
             # Translate the transcription
-            translated_text = self.translate_text(transcription_text)
+            translated_text = self.translate_text(transcription_text, backend)
             
             # Update UI based on timestamp mode
             timestamp_mode = self.config_manager.get_timestamp_mode()
@@ -561,7 +709,7 @@ class TranscriptionManager:
             print(f"Error during transcription: {e}")
             self.ui_updater(f"Error: {e}", "", "", timestamp)
 
-    def _transcribe_file(self, file_path, file_data, timestamp):
+    def _transcribe_file(self, file_path, file_data, timestamp, backend=None):
         """Transcribe an audio file.
         
         Args:
@@ -570,28 +718,34 @@ class TranscriptionManager:
             timestamp: The timestamp of the transcription request
         """
         try:
-            transcription_text = self.transcribe_audio_buffer(io.BytesIO(file_data), os.path.basename(file_path))
+            backend = backend or self.config_manager.get_file_backend()
+            transcription_text = self.transcribe_audio_buffer(io.BytesIO(file_data), os.path.basename(file_path), backend)
             
             # Save transcription to file
-            with open("transcription_from_file.txt", "w", encoding='utf-8') as f:
+            output_path = os.path.join(os.path.dirname(__file__), "transcription_from_file.txt")
+            with open(output_path, "w", encoding='utf-8') as f:
                 f.write(transcription_text)
             
             # Translate the transcription
-            translated_text = self.translate_text(transcription_text)
+            translated_text = self.translate_text(transcription_text, backend)
             
             # Update UI
             self.ui_updater(transcription_text, translated_text, "", timestamp)
             
             # Add to transcription history
             self.add_transcription(timestamp, transcription_text)
+            if self.status_callback:
+                self.status_callback("File transcription complete", "green")
             
         except Exception as e:
             print(f"Error transcribing file: {e}")
+            if self.status_callback:
+                self.status_callback(f"File transcription failed: {e}", "red")
             self.ui_updater(f"Error: {e}", "", "", timestamp)
 
-    def transcribe_audio_buffer(self, audio_buffer, filename):
+    def transcribe_audio_buffer(self, audio_buffer, filename, backend=None):
         """Transcribe an audio buffer with the selected provider."""
-        backend = self.config_manager.get_translation_backend()
+        backend = backend or self.config_manager.get_translation_backend()
         audio_buffer.seek(0)
 
         if backend == OPENAI_CHUNKED_BACKEND:
@@ -614,7 +768,7 @@ class TranscriptionManager:
         )
         return extract_text(transcription)
 
-    def translate_text(self, text):
+    def translate_text(self, text, backend=None):
         """Translate text to the target language.
         
         Args:
@@ -628,7 +782,7 @@ class TranscriptionManager:
             
         try:
             target_language = self.config_manager.get_translation_language()
-            backend = self.config_manager.get_translation_backend()
+            backend = backend or self.config_manager.get_translation_backend()
 
             if backend == OPENAI_CHUNKED_BACKEND:
                 if not self.openai_client:
@@ -817,7 +971,8 @@ class TranscriptionManager:
             timestamp: The timestamp of the transcription
         """
         try:
-            with open("transcriptions.txt", "a", encoding="utf-8") as f:
+            output_path = os.path.join(os.path.dirname(__file__), "transcriptions.txt")
+            with open(output_path, "a", encoding="utf-8") as f:
                 if timestamp:
                     formatted_timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S")
                     f.write(f"[{formatted_timestamp}]\n{text}\n")
@@ -880,8 +1035,8 @@ class ConfigManager:
     
     def __init__(self):
         """Initialize the configuration manager."""
-        self.config = self.DEFAULT_CONFIG.copy()
-        self.config_file = 'settings.json'
+        self.config = copy.deepcopy(self.DEFAULT_CONFIG)
+        self.config_file = os.path.join(os.path.dirname(__file__), 'settings.json')
         self.transcription_manager = None  # Will be set after initialization
         self._load_config()
         
@@ -919,16 +1074,17 @@ class ConfigManager:
     def get_recording_period(self):
         """Get the recording period in seconds."""
         try:
-            return int(self.config.get('recording_period', 5))
-        except ValueError:
+            return max(1, min(30, int(self.config.get('recording_period', 5))))
+        except (TypeError, ValueError):
             return 5
             
     def set_recording_period(self, seconds):
         """Set the recording period in seconds."""
         try:
-            self.config['recording_period'] = int(seconds)
-        except ValueError:
+            self.config['recording_period'] = max(1, min(30, int(seconds)))
+        except (TypeError, ValueError):
             self.config['recording_period'] = 5
+        return self.config['recording_period']
             
     def get_translation_language(self):
         """Get the target translation language."""
@@ -948,6 +1104,13 @@ class ConfigManager:
         """Set the selected transcription/translation backend."""
         allowed = {LEGACY_GROQ_BACKEND, OPENAI_CHUNKED_BACKEND, OPENAI_REALTIME_BACKEND}
         self.config['translation_backend'] = backend if backend in allowed else LEGACY_GROQ_BACKEND
+
+    def get_file_backend(self):
+        """Use chunked OpenAI for files when realtime is selected."""
+        backend = self.get_translation_backend()
+        if backend == OPENAI_REALTIME_BACKEND:
+            return OPENAI_CHUNKED_BACKEND
+        return backend
         
     def get_transliteration_language(self):
         """Get the target transliteration language."""
@@ -1058,9 +1221,14 @@ class UIManager:
         self.transliteration_language_var = tk.StringVar(value=self.config_manager.get_transliteration_language())
         self.translation_language_var = tk.StringVar(value=self.config_manager.get_translation_language())
         self.translation_backend_var = tk.StringVar(value=self.config_manager.get_translation_backend())
+        self.recording_period_var = tk.StringVar(value=str(self.config_manager.get_recording_period()))
+        self.profile_var = tk.StringVar()
         
         # Dictionary to store personal info entries
         self.personal_info_entries = {}
+        self.pane_frames = {}
+        self.controls_to_disable_while_recording = []
+        self.recording_status_var = tk.StringVar(value="Ready")
         
         # Text widgets and scrollbars
         self.result_text1 = None
@@ -1071,6 +1239,10 @@ class UIManager:
         self.scrollbar3 = None
         self.status_label = None
         self.record_button = None
+        self.transcribe_button = None
+        self.translation_dropdown = None
+        self.save_profile_entry = None
+        self.profile_dropdown = None
         self.controls_frame = None
         
         # Set up UI components
@@ -1097,13 +1269,13 @@ class UIManager:
         
     def setup_ui(self):
         """Set up the user interface."""
-        self.root.title("WhisperMind 2.0")
-        self.root.geometry("1200x700")  # Larger default size
+        self.root.title("WhisperMind")
+        self.root.geometry("1320x820")
+        self.root.minsize(980, 640)
+        self.root.option_add("*Font", ("Helvetica", 12))
         
         # Configure grid
         self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_columnconfigure(1, weight=1)
-        self.root.grid_columnconfigure(2, weight=1)
         self.root.grid_rowconfigure(1, weight=1)
         
         # Set up frames
@@ -1124,248 +1296,286 @@ class UIManager:
     def setup_top_frame(self):
         """Set up the top frame with title and main controls."""
         top_frame = tk.Frame(self.root)
-        top_frame.grid(row=0, column=0, columnspan=3, pady=10, sticky="ew")
+        top_frame.grid(row=0, column=0, pady=(10, 6), padx=12, sticky="ew")
         top_frame.columnconfigure(0, weight=1)
-        top_frame.columnconfigure(1, weight=1)
-        top_frame.columnconfigure(2, weight=1)
+        top_frame.columnconfigure(1, weight=0)
+        top_frame.columnconfigure(2, weight=0)
+        top_frame.columnconfigure(3, weight=0)
         
         # Add title label
-        title_label = tk.Label(top_frame, text="WhisperMind 2.0", font=("Helvetica", 16))
-        title_label.grid(row=0, column=0, pady=10, padx=5, sticky="w")
+        title_label = tk.Label(top_frame, text="WhisperMind", font=("Helvetica", 18, "bold"))
+        title_label.grid(row=0, column=0, sticky="w")
+
+        backend_label = tk.Label(top_frame, textvariable=self.translation_backend_var, fg="#555555")
+        backend_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
         
         # Add record button
         self.record_button = tk.Button(
             top_frame, 
             text="Start Recording", 
             command=self.toggle_recording,
+            width=18,
             background="SystemButtonFace"
         )
-        self.record_button.grid(row=0, column=1, pady=10, padx=5)
+        self.record_button.grid(row=0, column=1, rowspan=2, padx=(8, 6), sticky="e")
+
+        self.transcribe_button = tk.Button(
+            top_frame,
+            text="Transcribe File",
+            command=self.transcribe_file,
+            width=16,
+        )
+        self.transcribe_button.grid(row=0, column=2, rowspan=2, padx=6, sticky="e")
         
         # Add properties checkbox
         show_properties_checkbox = tk.Checkbutton(
             top_frame, 
-            text="Show properties", 
+            text="Settings", 
             variable=self.show_properties_var, 
             command=self.toggle_properties
         )
-        show_properties_checkbox.grid(row=0, column=2, pady=10, padx=5, sticky="e")
+        show_properties_checkbox.grid(row=0, column=3, rowspan=2, padx=(6, 0), sticky="e")
         
     def setup_text_boxes(self):
         """Set up the text boxes for transcription and translation."""
-        # Original text box
-        self.result_text1 = tk.Text(self.root, font=("Helvetica", 12), wrap=tk.WORD, height=10, width=50)
-        self.scrollbar1 = tk.Scrollbar(self.root, command=self.result_text1.yview)
-        self.result_text1.config(yscrollcommand=self.scrollbar1.set)
-        self.result_text1.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=10)
-        self.scrollbar1.grid(row=1, column=0, sticky="nse", pady=10)
+        self.panes_frame = tk.Frame(self.root)
+        self.panes_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        self.panes_frame.grid_rowconfigure(0, weight=1)
+
+        original_frame = self.create_text_pane("Original", 0)
+        translated_frame = self.create_text_pane("Translation", 1)
+        suggestion_frame = self.create_text_pane("Suggestions", 2)
+        self.pane_frames = {
+            "original": original_frame,
+            "translated": translated_frame,
+            "suggestions": suggestion_frame,
+        }
+
+        self.result_text1 = original_frame.text_widget
+        self.scrollbar1 = original_frame.scrollbar
+        self.result_text2 = translated_frame.text_widget
+        self.scrollbar2 = translated_frame.scrollbar
+        self.result_text3 = suggestion_frame.text_widget
+        self.scrollbar3 = suggestion_frame.scrollbar
+
         self.result_text1.insert(tk.END, "Listening...")
-        self.result_text1.config(state=tk.DISABLED)
-        
-        # Translated text box
-        self.result_text2 = tk.Text(self.root, font=("Helvetica", 12), wrap=tk.WORD, height=10, width=50)
-        self.scrollbar2 = tk.Scrollbar(self.root, command=self.result_text2.yview)
-        self.result_text2.config(yscrollcommand=self.scrollbar2.set)
-        self.result_text2.grid(row=1, column=1, sticky="nsew", padx=5, pady=10)
-        self.scrollbar2.grid(row=1, column=1, sticky="nse", pady=10)
         self.result_text2.insert(tk.END, "Listening... (translated)")
-        self.result_text2.config(state=tk.DISABLED)
-        
-        # Suggestions text box
-        self.result_text3 = tk.Text(self.root, font=("Helvetica", 12), wrap=tk.WORD, height=10, width=50)
-        self.scrollbar3 = tk.Scrollbar(self.root, command=self.result_text3.yview)
-        self.result_text3.config(yscrollcommand=self.scrollbar3.set)
-        self.result_text3.grid(row=1, column=2, sticky="nsew", padx=(5, 10), pady=10)
-        self.scrollbar3.grid(row=1, column=2, sticky="nse", pady=10)
-        self.result_text3.insert(tk.END, "Press space to see Claude suggestions")
-        self.result_text3.config(state=tk.DISABLED)
+        self.result_text3.insert(tk.END, "Press Space to generate suggestions")
+        for text_widget in (self.result_text1, self.result_text2, self.result_text3):
+            text_widget.config(state=tk.DISABLED)
+
+    def create_text_pane(self, title, column):
+        """Create a labeled text pane with a non-overlapping scrollbar."""
+        pane = tk.Frame(self.panes_frame, bd=1, relief=tk.SOLID)
+        pane.grid(row=0, column=column, sticky="nsew", padx=4)
+        pane.grid_rowconfigure(1, weight=1)
+        pane.grid_columnconfigure(0, weight=1)
+        self.panes_frame.grid_columnconfigure(column, weight=1)
+
+        label = tk.Label(pane, text=title, anchor="w", font=("Helvetica", 12, "bold"), bg="#f3f3f3")
+        label.grid(row=0, column=0, columnspan=2, sticky="ew")
+
+        text_widget = tk.Text(pane, font=("Helvetica", 12), wrap=tk.WORD, height=10, width=40, bd=0)
+        scrollbar = tk.Scrollbar(pane, command=text_widget.yview)
+        text_widget.config(yscrollcommand=scrollbar.set)
+        text_widget.grid(row=1, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        scrollbar.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=8)
+
+        pane.text_widget = text_widget
+        pane.scrollbar = scrollbar
+        return pane
         
     def setup_controls_frame(self):
         """Set up the controls frame with settings and options."""
         self.controls_frame = tk.Frame(self.root)
-        self.controls_frame.grid(row=2, column=0, columnspan=3, pady=10, sticky="ew")
-        
-        # Recording period
-        record_period_label = tk.Label(self.controls_frame, text="Recording period (seconds):", font=("Helvetica", 12))
-        record_period_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        
-        record_period_entry = tk.Entry(self.controls_frame, font=("Helvetica", 12), width=5)
-        record_period_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        record_period_entry.insert(0, str(self.config_manager.get_recording_period()))
-        record_period_entry.bind("<FocusOut>", lambda e: self.config_manager.set_recording_period(record_period_entry.get()))
-        
-        # Checkboxes for options
-        auto_scroll_checkbox = tk.Checkbutton(
-            self.controls_frame, 
-            text="Auto-scroll", 
-            variable=self.auto_scroll_var,
-            command=lambda: self.config_manager.set_auto_scroll(self.auto_scroll_var.get())
-        )
-        auto_scroll_checkbox.grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        
+        self.controls_frame.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="ew")
+        for column in range(3):
+            self.controls_frame.grid_columnconfigure(column, weight=1)
+
+        recording_frame = tk.LabelFrame(self.controls_frame, text="Recording")
+        recording_frame.grid(row=0, column=0, padx=(0, 6), pady=4, sticky="nsew")
+        recording_frame.grid_columnconfigure(1, weight=1)
+
+        backend_frame = tk.LabelFrame(self.controls_frame, text="Backend & Languages")
+        backend_frame.grid(row=0, column=1, padx=6, pady=4, sticky="nsew")
+        backend_frame.grid_columnconfigure(1, weight=1)
+
+        assistant_frame = tk.LabelFrame(self.controls_frame, text="Suggestions")
+        assistant_frame.grid(row=0, column=2, padx=(6, 0), pady=4, sticky="nsew")
+        assistant_frame.grid_columnconfigure(1, weight=1)
+
+        tk.Label(recording_frame, text="Chunk seconds").grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        record_period_entry = tk.Entry(recording_frame, textvariable=self.recording_period_var, width=6)
+        record_period_entry.grid(row=0, column=1, padx=8, pady=6, sticky="w")
+        record_period_entry.bind("<FocusOut>", self.validate_recording_period)
+        record_period_entry.bind("<Return>", self.validate_recording_period)
+        self.controls_to_disable_while_recording.append(record_period_entry)
+
         timestamp_mode_checkbox = tk.Checkbutton(
-            self.controls_frame, 
-            text="Timestamp every minute", 
+            recording_frame,
+            text="Timestamp every minute",
             variable=self.timestamp_mode_var,
             command=lambda: self.config_manager.set_timestamp_mode(self.timestamp_mode_var.get())
         )
-        timestamp_mode_checkbox.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        
+        timestamp_mode_checkbox.grid(row=1, column=0, columnspan=2, padx=8, pady=4, sticky="w")
+
+        auto_scroll_checkbox = tk.Checkbutton(
+            recording_frame,
+            text="Auto-scroll",
+            variable=self.auto_scroll_var,
+            command=lambda: self.config_manager.set_auto_scroll(self.auto_scroll_var.get())
+        )
+        auto_scroll_checkbox.grid(row=2, column=0, columnspan=2, padx=8, pady=4, sticky="w")
+
         show_original_checkbox = tk.Checkbutton(
-            self.controls_frame, 
-            text="Show Original", 
-            variable=self.show_original_var, 
+            recording_frame,
+            text="Show original",
+            variable=self.show_original_var,
             command=lambda: [self.config_manager.set_show_original(self.show_original_var.get()), self.update_layout()]
         )
-        show_original_checkbox.grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        
+        show_original_checkbox.grid(row=3, column=0, padx=8, pady=4, sticky="w")
+
         show_suggestions_checkbox = tk.Checkbutton(
-            self.controls_frame, 
-            text="Show Suggestions", 
-            variable=self.show_suggestions_var, 
+            recording_frame,
+            text="Show suggestions",
+            variable=self.show_suggestions_var,
             command=lambda: [self.config_manager.set_show_suggestions(self.show_suggestions_var.get()), self.update_layout()]
         )
-        show_suggestions_checkbox.grid(row=2, column=1, padx=5, pady=5, sticky="w")
-        
-        # Language selections
-        backend_label = tk.Label(self.controls_frame, text="Translation Backend:", font=("Helvetica", 12))
-        backend_label.grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        show_suggestions_checkbox.grid(row=3, column=1, padx=8, pady=4, sticky="w")
 
+        tk.Label(backend_frame, text="Mode").grid(row=0, column=0, padx=8, pady=6, sticky="w")
         backend_dropdown = ttk.Combobox(
-            self.controls_frame,
+            backend_frame,
             textvariable=self.translation_backend_var,
             values=[LEGACY_GROQ_BACKEND, OPENAI_CHUNKED_BACKEND, OPENAI_REALTIME_BACKEND],
             state="readonly",
-            width=36,
+            width=34,
         )
-        backend_dropdown.grid(row=3, column=1, padx=5, pady=5, sticky="w")
-        backend_dropdown.bind("<<ComboboxSelected>>",
-                              lambda e: self.config_manager.set_translation_backend(self.translation_backend_var.get()))
+        backend_dropdown.grid(row=0, column=1, padx=8, pady=6, sticky="ew")
+        backend_dropdown.bind("<<ComboboxSelected>>", self.on_backend_selected)
+        self.controls_to_disable_while_recording.append(backend_dropdown)
 
-        translit_label = tk.Label(self.controls_frame, text="Transliteration Language:", font=("Helvetica", 12))
-        translit_label.grid(row=4, column=0, padx=5, pady=5, sticky="w")
-        
-        translit_options = ['Russian', 'Spanish', 'French', 'German', 'Chinese', 'Japanese', 'Korean', 'Arabic']
-        translit_dropdown = ttk.Combobox(
-            self.controls_frame, 
-            textvariable=self.transliteration_language_var,
-            values=translit_options,
-            state="readonly"
-        )
-        translit_dropdown.grid(row=4, column=1, padx=5, pady=5, sticky="w")
-        translit_dropdown.bind("<<ComboboxSelected>>", 
-                               lambda e: self.config_manager.set_transliteration_language(self.transliteration_language_var.get()))
-        
-        translation_label = tk.Label(self.controls_frame, text="Translate To:", font=("Helvetica", 12))
-        translation_label.grid(row=5, column=0, padx=5, pady=5, sticky="w")
-        
-        translation_options = ['English', 'Spanish', 'French', 'German', 'Chinese', 'Japanese', 'Korean', 'Arabic']
+        tk.Label(backend_frame, text="Translate to").grid(row=1, column=0, padx=8, pady=6, sticky="w")
         translation_dropdown = ttk.Combobox(
-            self.controls_frame, 
+            backend_frame,
             textvariable=self.translation_language_var,
-            values=translation_options,
-            state="readonly"
+            values=TEXT_TRANSLATION_LANGUAGES,
+            state="readonly",
+            width=18,
         )
-        translation_dropdown.grid(row=5, column=1, padx=5, pady=5, sticky="w")
-        translation_dropdown.bind("<<ComboboxSelected>>", 
-                                  lambda e: self.config_manager.set_translation_language(self.translation_language_var.get()))
-        
-        # Personal information section
-        personal_info_label = tk.Label(self.controls_frame, text="Personal Info:", font=("Helvetica", 12, "bold"))
-        personal_info_label.grid(row=6, column=0, padx=5, pady=(15, 5), columnspan=2)
-        
-        # Name field
-        name_label = tk.Label(self.controls_frame, text="Name:", font=("Helvetica", 12))
-        name_label.grid(row=7, column=0, padx=5, pady=5, sticky="w")
-        name_entry = tk.Entry(self.controls_frame, font=("Helvetica", 12))
-        name_entry.grid(row=7, column=1, padx=5, pady=5, sticky="ew")
+        translation_dropdown.grid(row=1, column=1, padx=8, pady=6, sticky="ew")
+        translation_dropdown.bind("<<ComboboxSelected>>", self.on_translation_language_selected)
+        self.controls_to_disable_while_recording.append(translation_dropdown)
+        self.translation_dropdown = translation_dropdown
+
+        tk.Label(backend_frame, text="Transliterate as").grid(row=2, column=0, padx=8, pady=6, sticky="w")
+        translit_dropdown = ttk.Combobox(
+            backend_frame,
+            textvariable=self.transliteration_language_var,
+            values=TRANSLITERATION_LANGUAGES,
+            state="readonly",
+            width=18,
+        )
+        translit_dropdown.grid(row=2, column=1, padx=8, pady=6, sticky="ew")
+        translit_dropdown.bind("<<ComboboxSelected>>",
+                               lambda e: self.config_manager.set_transliteration_language(self.transliteration_language_var.get()))
+
+        tk.Label(assistant_frame, text="Name").grid(row=0, column=0, padx=8, pady=5, sticky="w")
+        name_entry = tk.Entry(assistant_frame)
+        name_entry.grid(row=0, column=1, padx=8, pady=5, sticky="ew")
         name_entry.insert(0, self.config_manager.get_personal_info().get('name', ''))
         self.personal_info_entries['name'] = name_entry
-        
-        # Goal field
-        goal_label = tk.Label(self.controls_frame, text="Conversation Goal:", font=("Helvetica", 12))
-        goal_label.grid(row=8, column=0, padx=5, pady=5, sticky="w")
-        goal_entry = tk.Entry(self.controls_frame, font=("Helvetica", 12))
-        goal_entry.grid(row=8, column=1, padx=5, pady=5, sticky="ew")
+
+        tk.Label(assistant_frame, text="Goal").grid(row=1, column=0, padx=8, pady=5, sticky="w")
+        goal_entry = tk.Entry(assistant_frame)
+        goal_entry.grid(row=1, column=1, padx=8, pady=5, sticky="ew")
         goal_entry.insert(0, self.config_manager.get_personal_info().get('goal', ''))
         self.personal_info_entries['goal'] = goal_entry
-        
-        # Style field
-        style_label = tk.Label(self.controls_frame, text="Preferred Style:", font=("Helvetica", 12))
-        style_label.grid(row=9, column=0, padx=5, pady=5, sticky="w")
-        style_entry = tk.Entry(self.controls_frame, font=("Helvetica", 12))
-        style_entry.grid(row=9, column=1, padx=5, pady=5, sticky="ew")
+
+        tk.Label(assistant_frame, text="Style").grid(row=2, column=0, padx=8, pady=5, sticky="w")
+        style_entry = tk.Entry(assistant_frame)
+        style_entry.grid(row=2, column=1, padx=8, pady=5, sticky="ew")
         style_entry.insert(0, self.config_manager.get_personal_info().get('style', ''))
         self.personal_info_entries['style'] = style_entry
-        
-        # Length field
-        length_label = tk.Label(self.controls_frame, text="Preferred Length:", font=("Helvetica", 12))
-        length_label.grid(row=10, column=0, padx=5, pady=5, sticky="w")
-        length_entry = tk.Entry(self.controls_frame, font=("Helvetica", 12))
-        length_entry.grid(row=10, column=1, padx=5, pady=5, sticky="ew")
+
+        tk.Label(assistant_frame, text="Length").grid(row=3, column=0, padx=8, pady=5, sticky="w")
+        length_entry = tk.Entry(assistant_frame)
+        length_entry.grid(row=3, column=1, padx=8, pady=5, sticky="ew")
         length_entry.insert(0, self.config_manager.get_personal_info().get('length', ''))
         self.personal_info_entries['length'] = length_entry
-        
-        # Add profile management UI
+
         profile_frame = tk.Frame(self.controls_frame)
-        profile_frame.grid(row=11, column=0, columnspan=2, padx=5, pady=10)
-        
-        profile_label = tk.Label(profile_frame, text="Profile:", font=("Helvetica", 12))
-        profile_label.pack(side=tk.LEFT, padx=5)
-        
-        profiles = self.config_manager.get_profiles()
-        profile_var = tk.StringVar()
-        profile_dropdown = ttk.Combobox(
-            profile_frame, 
-            textvariable=profile_var,
-            values=profiles,
-            width=15
+        profile_frame.grid(row=1, column=0, columnspan=2, padx=(0, 6), pady=(6, 0), sticky="ew")
+        profile_frame.grid_columnconfigure(1, weight=1)
+        profile_frame.grid_columnconfigure(4, weight=1)
+
+        tk.Label(profile_frame, text="Profile").grid(row=0, column=0, padx=(0, 6), sticky="w")
+        self.profile_dropdown = ttk.Combobox(
+            profile_frame,
+            textvariable=self.profile_var,
+            values=self.config_manager.get_profiles(),
+            width=18,
         )
-        profile_dropdown.pack(side=tk.LEFT, padx=5)
-        
-        load_profile_button = tk.Button(
-            profile_frame, 
-            text="Load", 
-            command=lambda: self.load_profile(profile_var.get())
-        )
-        load_profile_button.pack(side=tk.LEFT, padx=5)
-        
-        save_profile_entry = tk.Entry(profile_frame, width=15)
-        save_profile_entry.pack(side=tk.LEFT, padx=5)
-        
-        save_profile_button = tk.Button(
-            profile_frame, 
-            text="Save As", 
-            command=lambda: self.save_profile(save_profile_entry.get())
-        )
-        save_profile_button.pack(side=tk.LEFT, padx=5)
-        
-        # Buttons frame for actions
+        self.profile_dropdown.grid(row=0, column=1, padx=4, sticky="ew")
+        tk.Button(profile_frame, text="Load", command=lambda: self.load_profile(self.profile_var.get())).grid(row=0, column=2, padx=4)
+        self.save_profile_entry = tk.Entry(profile_frame, width=18)
+        self.save_profile_entry.grid(row=0, column=3, padx=(14, 4), sticky="ew")
+        tk.Button(profile_frame, text="Save As", command=lambda: self.save_profile(self.save_profile_entry.get())).grid(row=0, column=4, padx=4, sticky="w")
+
         button_frame = tk.Frame(self.controls_frame)
-        button_frame.grid(row=12, column=0, columnspan=2, padx=5, pady=10)
-        
-        transcribe_button = tk.Button(button_frame, text="Transcribe File", command=self.transcribe_file)
-        transcribe_button.pack(side=tk.LEFT, padx=5)
-        
-        clear_button = tk.Button(button_frame, text="Clear Text", command=self.clear_text_boxes)
-        clear_button.pack(side=tk.LEFT, padx=5)
-        
-        save_settings_button = tk.Button(button_frame, text="Save Settings", command=self.save_settings)
-        save_settings_button.pack(side=tk.LEFT, padx=5)
+        button_frame.grid(row=1, column=2, padx=(6, 0), pady=(6, 0), sticky="e")
+        tk.Button(button_frame, text="Generate Suggestions", command=self.generate_suggestions_from_button).pack(side=tk.LEFT, padx=4)
+        tk.Button(button_frame, text="Clear", command=self.clear_text_boxes).pack(side=tk.LEFT, padx=4)
+        tk.Button(button_frame, text="Save Settings", command=self.save_settings).pack(side=tk.LEFT, padx=4)
+        self.update_translation_language_options()
         
         # Initially hide controls if needed
         if not self.show_properties_var.get():
             self.controls_frame.grid_remove()
+
+    def validate_recording_period(self, event=None):
+        """Clamp the recording period and reflect the actual saved value."""
+        value = self.config_manager.set_recording_period(self.recording_period_var.get())
+        self.recording_period_var.set(str(value))
+        return "break" if event and getattr(event, "keysym", None) == "Return" else None
+
+    def on_backend_selected(self, event=None):
+        """Persist backend selection and adjust target-language options."""
+        backend = self.translation_backend_var.get()
+        self.config_manager.set_translation_backend(backend)
+        self.update_translation_language_options()
+
+    def update_translation_language_options(self):
+        """Limit target languages for OpenAI realtime translation."""
+        backend = self.config_manager.get_translation_backend()
+        options = REALTIME_OUTPUT_LANGUAGES if backend == OPENAI_REALTIME_BACKEND else TEXT_TRANSLATION_LANGUAGES
+        if self.translation_dropdown:
+            self.translation_dropdown["values"] = options
+        if self.translation_language_var.get() not in options:
+            self.translation_language_var.set("English")
+            self.config_manager.set_translation_language("English")
+
+    def on_translation_language_selected(self, event=None):
+        """Persist target language selection."""
+        language = self.translation_language_var.get()
+        if self.config_manager.get_translation_backend() == OPENAI_REALTIME_BACKEND and language not in REALTIME_OUTPUT_LANGUAGES:
+            language = "English"
+            self.translation_language_var.set(language)
+        self.config_manager.set_translation_language(language)
+
+    def generate_suggestions_from_button(self):
+        """Generate suggestions from an explicit UI action."""
+        self.on_space_press(None)
         
     def setup_status_bar(self):
         """Set up the status bar at the bottom of the window."""
         status_frame = tk.Frame(self.root)
-        status_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
+        status_frame.grid(row=3, column=0, sticky="ew")
         status_frame.columnconfigure(0, weight=1)
         
         self.status_label = tk.Label(
             status_frame, 
-            text="Ready", 
+            textvariable=self.recording_status_var,
             bd=1, 
             relief=tk.SUNKEN, 
             anchor=tk.W
@@ -1376,27 +1586,36 @@ class UIManager:
         """Set up keyboard shortcuts."""
         self.root.bind('<space>', self.on_space_press)
         self.root.bind('<Return>', self.toggle_recording_key)
-        self.root.bind('<Escape>', lambda e: self.on_closing())
+        self.root.bind('<Escape>', self.on_escape_press)
+
+    def is_text_input_event(self, event):
+        """Return true when a shortcut originated in an editable input."""
+        if event is None:
+            return False
+        return isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox))
         
     def update_layout(self):
         """Update the layout based on current visibility settings."""
+        visible = []
         if self.show_original_var.get():
-            self.result_text1.grid()
-            self.scrollbar1.grid()
+            visible.append(("original", self.pane_frames["original"]))
         else:
-            self.result_text1.grid_remove()
-            self.scrollbar1.grid_remove()
-        
-        # result_text2 is always visible
-        self.result_text2.grid()
-        self.scrollbar2.grid()
+            self.pane_frames["original"].grid_remove()
+
+        visible.append(("translated", self.pane_frames["translated"]))
         
         if self.show_suggestions_var.get():
-            self.result_text3.grid()
-            self.scrollbar3.grid()
+            visible.append(("suggestions", self.pane_frames["suggestions"]))
         else:
-            self.result_text3.grid_remove()
-            self.scrollbar3.grid_remove()
+            self.pane_frames["suggestions"].grid_remove()
+
+        for index, (name, frame) in enumerate(visible):
+            frame.grid(row=0, column=index, sticky="nsew", padx=4)
+
+        for column in range(3):
+            self.panes_frame.grid_columnconfigure(column, weight=0)
+        for column in range(len(visible)):
+            self.panes_frame.grid_columnconfigure(column, weight=1, uniform="panes")
         
         self.root.update_idletasks()
         
@@ -1498,8 +1717,11 @@ class UIManager:
         
         self.result_text3.config(state=tk.NORMAL)
         self.result_text3.delete(1.0, tk.END)
-        self.result_text3.insert(tk.END, "Press space to see Claude suggestions")
+        self.result_text3.insert(tk.END, "Press Space to generate suggestions")
         self.result_text3.config(state=tk.DISABLED)
+        if self.transcription_manager:
+            self.transcription_manager.clear_history()
+        self.update_status("Cleared transcript and suggestion history", "black")
         
     def update_status(self, status_text, color="black"):
         """Update the status bar text.
@@ -1512,7 +1734,8 @@ class UIManager:
             self.root.after(0, self.update_status, status_text, color)
             return
 
-        self.status_label.config(text=status_text, fg=color)
+        self.recording_status_var.set(status_text)
+        self.status_label.config(fg=color)
         self.root.update_idletasks()
         
     def toggle_recording(self):
@@ -1524,17 +1747,25 @@ class UIManager:
             
     def toggle_recording_key(self, event):
         """Handle recording toggle from keyboard shortcut."""
+        if self.is_text_input_event(event):
+            return
         self.toggle_recording()
+
+    def on_escape_press(self, event):
+        """Close the app unless the user is editing an input."""
+        if self.is_text_input_event(event):
+            return
+        self.on_closing()
         
     def start_recording(self):
         """Start audio recording."""
         if not self.audio_recorder:
             self.update_status("Audio recorder not initialized", "red")
             return
-            
-        self.is_recording = True
-        self.record_button.config(text="Stop Recording", bg="red")
-        self.update_status("Recording...", "green")
+
+        self.validate_recording_period()
+        self.config_manager.set_translation_backend(self.translation_backend_var.get())
+        self.config_manager.set_translation_language(self.translation_language_var.get())
         
         # Save personal info before starting recording
         self.save_personal_info()
@@ -1543,26 +1774,54 @@ class UIManager:
         try:
             self.audio_recorder.start_recording()
         except Exception as e:
-            self.is_recording = False
-            self.record_button.config(text="Start Recording", bg="SystemButtonFace")
+            self.on_recorder_state_changed(False)
             self.update_status(f"Recording failed: {e}", "red")
         
     def stop_recording(self):
         """Stop audio recording."""
         if not self.audio_recorder:
             return
-            
-        self.is_recording = False
-        self.record_button.config(text="Start Recording", bg="SystemButtonFace")
-        self.update_status("Ready", "black")
         
         # Stop the audio recorder
         self.audio_recorder.stop_recording()
+
+    def on_recorder_state_changed(self, is_recording):
+        """Synchronize UI state with recorder state."""
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(0, self.on_recorder_state_changed, is_recording)
+            return
+        self.is_recording = is_recording
+        self.record_button.config(
+            text="Stop Recording" if is_recording else "Start Recording",
+            bg="red" if is_recording else "SystemButtonFace",
+        )
+        self.update_controls_recording_state(is_recording)
+        if is_recording:
+            self.update_status("Recording...", "green")
+        else:
+            self.update_status("Ready", "black")
+
+    def update_controls_recording_state(self, is_recording):
+        """Disable backend/period controls while a recording session is active."""
+        state = "disabled" if is_recording else "normal"
+        readonly_state = "disabled" if is_recording else "readonly"
+        for widget in self.controls_to_disable_while_recording:
+            if isinstance(widget, ttk.Combobox):
+                widget.configure(state=readonly_state)
+            else:
+                widget.configure(state=state)
+        if self.transcribe_button:
+            self.transcribe_button.configure(state=state)
         
     def on_space_press(self, event):
         """Handle space key press to generate suggestions."""
+        if self.is_text_input_event(event):
+            return
         if not self.transcription_manager:
             self.update_status("Transcription manager not initialized", "red")
+            return
+        if not self.show_suggestions_var.get():
+            self.update_status("Suggestions are hidden; enable Show suggestions first", "orange")
             return
             
         # Generate suggestions from recent transcriptions
@@ -1581,7 +1840,10 @@ class UIManager:
             
             # Update UI in the main thread
             self.root.after(0, lambda: self.update_suggestion_box(suggestions))
-            self.root.after(0, lambda: self.update_status("Suggestions generated", "green"))
+            if suggestions.startswith("No recent conversation") or "not initialized" in suggestions or suggestions.startswith("Error"):
+                self.root.after(0, lambda: self.update_status(suggestions, "orange"))
+            else:
+                self.root.after(0, lambda: self.update_status("Suggestions generated", "green"))
         except Exception as e:
             print(f"Error generating suggestions: {e}")
             self.root.after(0, lambda: self.update_status(f"Error generating suggestions: {e}", "red"))
@@ -1607,16 +1869,23 @@ class UIManager:
             
     def save_settings(self):
         """Save current settings to the configuration file."""
-        self.config_manager.set_translation_backend(self.translation_backend_var.get())
-        self.config_manager.set_translation_language(self.translation_language_var.get())
-        self.config_manager.set_transliteration_language(self.transliteration_language_var.get())
-
-        # First update personal info
-        self.save_personal_info()
+        self.sync_settings_from_ui()
         
         # Then save all settings
         self.config_manager.save_config()
         self.update_status("Settings saved", "green")
+
+    def sync_settings_from_ui(self):
+        """Persist all in-memory UI settings to the config manager."""
+        self.validate_recording_period()
+        self.config_manager.set_translation_backend(self.translation_backend_var.get())
+        self.config_manager.set_translation_language(self.translation_language_var.get())
+        self.config_manager.set_transliteration_language(self.transliteration_language_var.get())
+        self.config_manager.set_auto_scroll(self.auto_scroll_var.get())
+        self.config_manager.set_timestamp_mode(self.timestamp_mode_var.get())
+        self.config_manager.set_show_original(self.show_original_var.get())
+        self.config_manager.set_show_suggestions(self.show_suggestions_var.get())
+        self.save_personal_info()
         
     def save_personal_info(self):
         """Save personal information from the UI fields."""
@@ -1634,20 +1903,15 @@ class UIManager:
             messagebox.showerror("Error", "Please enter a profile name")
             return
             
-        # Update personal info before saving
-        self.save_personal_info()
+        # Update settings before saving
+        self.sync_settings_from_ui()
         
         # Save as profile
         self.config_manager.save_profile(name)
         self.update_status(f"Profile '{name}' saved", "green")
         
         # Refresh profiles in UI
-        profiles = self.config_manager.get_profiles()
-        for widget in self.controls_frame.winfo_children():
-            if isinstance(widget, tk.Frame):
-                for child in widget.winfo_children():
-                    if isinstance(child, ttk.Combobox):
-                        child['values'] = profiles
+        self.refresh_profiles()
         
     def load_profile(self, name):
         """Load settings from a saved profile."""
@@ -1665,6 +1929,8 @@ class UIManager:
             self.transliteration_language_var.set(self.config_manager.get_transliteration_language())
             self.translation_language_var.set(self.config_manager.get_translation_language())
             self.translation_backend_var.set(self.config_manager.get_translation_backend())
+            self.recording_period_var.set(str(self.config_manager.get_recording_period()))
+            self.update_translation_language_options()
             
             # Update personal info fields
             personal_info = self.config_manager.get_personal_info()
@@ -1677,6 +1943,11 @@ class UIManager:
             self.update_status(f"Profile '{name}' loaded", "green")
         else:
             messagebox.showerror("Error", f"Profile '{name}' not found")
+
+    def refresh_profiles(self):
+        """Refresh profile dropdown after save/load changes."""
+        if self.profile_dropdown:
+            self.profile_dropdown["values"] = self.config_manager.get_profiles()
     
     def on_closing(self):
         """Handle application closing."""
@@ -1686,7 +1957,7 @@ class UIManager:
                 self.audio_recorder.stop_recording()
                 
             # Save settings before closing
-            self.save_personal_info()
+            self.sync_settings_from_ui()
             self.config_manager.save_config()
             
             # Destroy the window
@@ -1718,7 +1989,8 @@ def main():
     transcription_manager = TranscriptionManager(
         config_manager,
         ui_manager.update_gui,
-        ui_manager.append_realtime_text
+        ui_manager.append_realtime_text,
+        ui_manager.update_status
     )
     
     # Link managers
@@ -1728,7 +2000,8 @@ def main():
     # Create audio recorder
     audio_recorder = AudioRecorder(
         config_manager,
-        ui_manager.update_status
+        ui_manager.update_status,
+        ui_manager.on_recorder_state_changed
     )
     
     # Link audio recorder

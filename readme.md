@@ -37,13 +37,17 @@ Choose the backend in the settings panel:
 - `OpenAI GPT-4o Transcribe + Translate`: chunked microphone/file flow using OpenAI `gpt-4o-transcribe` plus `gpt-4.1-mini` text translation.
 - `OpenAI Realtime Translation`: streaming microphone translation with OpenAI `gpt-realtime-translate` over the dedicated `/v1/realtime/translations` WebSocket endpoint.
 
-OpenAI realtime translation requires `OPENAI_API_KEY` and streams 24 kHz mono PCM audio. The app displays source transcript deltas in the original column and translated transcript deltas in the translated column.
+OpenAI realtime translation requires `OPENAI_API_KEY` and streams 24 kHz mono PCM audio. The app displays source transcript deltas in the original column and translated transcript deltas in the translated column. File transcription uses the chunked OpenAI backend when realtime mode is selected, because realtime translation is microphone-only.
 
 ## Controls
 
 - Press Enter or click `Start Recording` to start/stop recording.
-- Press Space to generate conversation suggestions from the last 5 minutes of source transcripts.
+- Press Space or click `Generate Suggestions` to generate suggestions from the last 5 minutes of source transcripts.
+- Keyboard shortcuts are ignored while editing settings fields.
 - Use `Translate To` for the target language.
+- Realtime translation target languages are limited to the output languages supported by `gpt-realtime-translate`.
+- Recording chunk length is clamped to 1-30 seconds.
+- `Clear` clears both visible text and the suggestion history.
 - Use `Save Settings` to persist backend, language, display, profile, and personal-info settings.
 
 ## Notes
