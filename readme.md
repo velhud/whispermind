@@ -1,59 +1,56 @@
 # WhisperMind
 
-WhisperMind is an audio transcription and translation application that utilizes AI models to provide real-time suggestions and translations based on recorded audio. The application is built using Python and leverages libraries such as `pyaudio`, `tkinter`, and `anthropic`.
+WhisperMind is a local Tkinter app for live microphone transcription, translation, and conversation suggestions.
 
-## Features
+## Launch
 
-- **Audio Recording**: Record audio for a specified duration.
-- **Transcription**: Convert recorded audio into text using the Whisper model.
-- **Translation**: Translate transcribed text into English using the Groq API.
-- **Suggestions**: Generate conversation suggestions based on the transcribed text using the Claude model.
-- **User Interface**: A simple GUI built with Tkinter for easy interaction.
+```bash
+python3 -m pip install -r requirements.txt
+python3 whispermind.py
+```
 
-## Requirements
+If PyAudio fails on macOS, install PortAudio first and rebuild PyAudio:
 
-- Python 3.x
-- Required libraries:
-  - `pyaudio`
-  - `tkinter`
-  - `wave`
-  - `asyncio`
-  - `dotenv`
-  - `anthropic`
-  - `groq`
-  
-You can install the required libraries using pip:
+```bash
+brew install portaudio
+CFLAGS="-I/opt/homebrew/include" LDFLAGS="-L/opt/homebrew/lib" \
+  python3 -m pip install --force-reinstall --no-binary :all: --no-cache-dir pyaudio
+```
 
-bash
-pip install pyaudio python-dotenv anthropic groq
+## API Keys
 
+Create `.env` from `.env.example`:
 
-## Setup
+```plaintext
+GROQ_API_KEY=your_groq_api_key
+ANTHROPIC_API_KEY=your_anthropic_api_key
+OPENAI_API_KEY=your_openai_api_key
+```
 
-1. Clone the repository or download the code.
-2. Create a `.env` file in the project directory and add your API keys:
+The app launches without every key, but each backend needs its own key.
 
-   ```plaintext
-   ANTHROPIC_API_KEY=your_anthropic_api_key
-   GROQ_API_KEY=your_groq_api_key
-   ```
+## Translation Backends
 
-3. Run the application:
+Choose the backend in the settings panel:
 
-   ```bash
-   python whispermind1.01.py
-   ```
+- `Legacy Groq Whisper + Groq Translate`: existing chunked flow using Groq `whisper-large-v3` for transcription and `llama-3.3-70b-versatile` for text translation.
+- `OpenAI GPT-4o Transcribe + Translate`: chunked microphone/file flow using OpenAI `gpt-4o-transcribe` plus `gpt-4.1-mini` text translation.
+- `OpenAI Realtime Translation`: streaming microphone translation with OpenAI `gpt-realtime-translate` over the dedicated `/v1/realtime/translations` WebSocket endpoint.
 
-## Usage
+OpenAI realtime translation requires `OPENAI_API_KEY` and streams 24 kHz mono PCM audio. The app displays source transcript deltas in the original column and translated transcript deltas in the translated column.
 
-- Start the application and use the "Start/Stop Recording" button to record audio.
-- Press the spacebar to aggregate and view suggestions based on the last 5 minutes of transcriptions.
-- The application will display the original transcription, its translation, and suggestions in the GUI.
+## Controls
 
-## Contributing
+- Press Enter or click `Start Recording` to start/stop recording.
+- Press Space to generate conversation suggestions from the last 5 minutes of source transcripts.
+- Use `Translate To` for the target language.
+- Use `Save Settings` to persist backend, language, display, profile, and personal-info settings.
 
-Contributions are welcome! Please feel free to submit a pull request or open an issue for any enhancements or bug fixes.
+## Notes
 
-## License
-
-This project is licensed under the [Creative Commons Attribution-NonCommercial 4.0 International License](https://creativecommons.org/licenses/by-nc/4.0/) - see the LICENSE file for details.
+- The old Groq translation model was decommissioned; this version uses `llama-3.3-70b-versatile`.
+- The old Anthropic Sonnet model was unavailable for the configured key; this version uses `claude-sonnet-4-6`.
+- OpenAI official docs used for the integration:
+  - https://developers.openai.com/api/docs/guides/speech-to-text
+  - https://developers.openai.com/api/docs/guides/realtime-transcription
+  - https://developers.openai.com/api/docs/guides/realtime-translation

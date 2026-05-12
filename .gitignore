@@ -1,6 +1,5 @@
 wmenv/
-
 .env
-
+__pycache__/
+.gpt_cache/
 transcriptions.txt
-.env

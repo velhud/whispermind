@@ -100,7 +100,7 @@ def save_to_file(text, timestamp):
 def translate_text(text, target_language='English'):
     target_language = translation_language_var.get()
     completion = groq_client.chat.completions.create(
-        model="llama3-70b-8192",
+        model="llama-3.3-70b-versatile",
         messages=[
             {
                 "role": "system",
@@ -141,7 +141,7 @@ def process_with_claude_sonnet(text):
         )
 
         message = anthropic_client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-sonnet-4-6",
             max_tokens=4000,
             temperature=0.2,
             system=system_prompt,
@@ -166,7 +166,7 @@ def process_sonnet_response(sonnet_response):
         system_prompt = f"You are a professional transliterator of text. Identify the language of the text that you received and transliterate it to {target_language} in such a way that if {target_language} letters are pronounced by a {target_language.lower()} speaker, they will mimic as close as possible the pronunciation of the original text. In your response, return only the transliterated text and no other additional comments. Do not pay any attention to the content and meaning of the information you received; your job is only to do transliteration. Here is the text:"
 
         message = anthropic_client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-sonnet-4-6",
             max_tokens=4000,
             temperature=0.1,
             system=system_prompt,

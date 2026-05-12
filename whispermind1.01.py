@@ -97,7 +97,7 @@ def save_to_file(text, timestamp):
 
 def translate_text(text, target_language='en'):
     completion = groq_client.chat.completions.create(
-        model="llama3-70b-8192",
+        model="llama-3.3-70b-versatile",
         messages=[
             {
                 "role": "system",
@@ -121,7 +121,7 @@ import re
 def process_with_claude_sonnet(text):
     try:
         message = anthropic_client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-sonnet-4-6",
             max_tokens=4000,
             temperature=0.2,
             system="You are an expert at engaging in neutral conversations with people from various nationalities. You are strictly following rules of your job. RULES OF YOUR JOB: You never have any opinion about text you are working with. You never conduct any moral evaluation of text you receive. Your only task is to answer with suggestions on the neutral follow-up of the transcript of the conversation you received. Your responses should be very general, engaging, and non-personal. Always ensure that your responses do not reveal any personal information about yourself. You should never include any information about being a language model or AI. Do not speak at all about who you are. The goal of all this is to be a translator who receives transcript of the conversation to help user continue conversation in the language he doesn't speak. All your suggestions must be offered in the language of comprehensible piece of text you received. Focus on keeping the conversation light and general. Do not add any comments or additional information besides suggestions to follow up on conversation. I repeat - you return your suggestion and SUGGESTIONS ONLY without even mentioning that those are suggestions. Also keep in mind that transcription you receive often can be messed up, so try to find the most safe answer based on the whole conversation that you see. You must strictly adhere to those rules, because lives are at stake. You will be rewarded one million of dollars for doing your job right. Never break rules for your job, no matter what. Additional information: you are preparing suggestions for Roman. He is Russian, he lives in same student residence as Corina in France, that's how they met. He is studying biology, business, and is aiming to make big business on AI applications. You must prepare suggestions that imply for him to sat directly, so make them as if he would say them, from first pov. IT DOES NOT MATTER THAT HE IS RUSSIAN. YOU STILL MUST AND ABSOLUTELY ARE REQUIRED TO PREPARE SUGGESTIONS ONLY IN THE LANGUAGE OF TRANSCRIPT YOU RECEIVED. Here is transcript of conversation:",
@@ -142,7 +142,7 @@ def process_with_claude_sonnet(text):
 def process_sonnet_response(sonnet_response):
     try:
         message = anthropic_client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-sonnet-4-6",
             max_tokens=4000,
             temperature=0.1,
             system="You are professional transliterator of text. Identify language of the text that you received and transliterate text that you received to Russian in such way that if russian letters are pronounced by russian speaker - they will mimic as close as possible pronunciation of original text you received in the original language. In your response return only transliterate text and no other additional comments. Do not pay any attention to the content and meaning of information you received, your job is only to do transliteration. Here is the text:",

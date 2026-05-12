@@ -2,6 +2,7 @@ import pyaudio
 import wave
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import base64
 import threading
 import datetime
 import queue
@@ -12,8 +13,220 @@ import time
 import re
 from typing import List, Dict, Tuple, Optional, Any, Callable
 from groq import Groq
+from openai import OpenAI
 from dotenv import load_dotenv
 import anthropic
+import websocket
+
+LEGACY_GROQ_BACKEND = "Legacy Groq Whisper + Groq Translate"
+OPENAI_CHUNKED_BACKEND = "OpenAI GPT-4o Transcribe + Translate"
+OPENAI_REALTIME_BACKEND = "OpenAI Realtime Translation"
+
+LANGUAGE_CODES = {
+    "English": "en",
+    "Spanish": "es",
+    "French": "fr",
+    "German": "de",
+    "Chinese": "zh",
+    "Japanese": "ja",
+    "Korean": "ko",
+    "Arabic": "ar",
+    "Russian": "ru",
+    "Italian": "it",
+    "Portuguese": "pt",
+}
+
+
+def language_code(language_name):
+    """Return a best-effort language code for OpenAI realtime settings."""
+    return LANGUAGE_CODES.get(language_name, language_name[:2].lower())
+
+
+def extract_text(response):
+    """Normalize SDK responses that may be strings or objects with text fields."""
+    if isinstance(response, str):
+        return response.strip()
+    text = getattr(response, "text", None)
+    if text is not None:
+        return text.strip()
+    if isinstance(response, dict):
+        return str(response.get("text", "")).strip()
+    return str(response).strip()
+
+
+def extract_anthropic_text(message):
+    """Extract plain text from Anthropic message content blocks."""
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(text)
+            elif isinstance(block, dict) and block.get("text"):
+                parts.append(block["text"])
+        return "\n".join(parts).strip()
+    return str(content).strip()
+
+
+class RealtimeTranslationSession:
+    """Streams microphone audio to OpenAI realtime translation."""
+
+    RATE = 24000
+    CHUNK = 1200
+    FORMAT = pyaudio.paInt16
+    CHANNELS = 1
+
+    def __init__(
+        self,
+        api_key,
+        target_language,
+        ui_delta_updater,
+        add_transcription,
+        status_callback=None,
+    ):
+        self.api_key = api_key
+        self.target_language = target_language
+        self.ui_delta_updater = ui_delta_updater
+        self.add_transcription = add_transcription
+        self.status_callback = status_callback
+        self.ws = None
+        self.audio = None
+        self.stream = None
+        self.running = False
+        self.sender_thread = None
+        self.receiver_thread = None
+        self.source_buffer = ""
+        self.source_lock = threading.Lock()
+
+    def start(self):
+        if self.running:
+            return
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY is required for OpenAI realtime translation")
+
+        self.ws = websocket.WebSocket()
+        self.ws.connect(
+            "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate",
+            header=[
+                f"Authorization: Bearer {self.api_key}",
+                "OpenAI-Safety-Identifier: whispermind-local-user",
+            ],
+        )
+        self.running = True
+        self._send_session_update()
+
+        self.receiver_thread = threading.Thread(target=self._receive_events, daemon=True)
+        self.sender_thread = threading.Thread(target=self._send_audio, daemon=True)
+        self.receiver_thread.start()
+        self.sender_thread.start()
+
+        if self.status_callback:
+            self.status_callback("OpenAI realtime translation started")
+
+    def stop(self):
+        self.running = False
+        try:
+            if self.stream:
+                self.stream.stop_stream()
+                self.stream.close()
+        except Exception:
+            pass
+        try:
+            if self.audio:
+                self.audio.terminate()
+        except Exception:
+            pass
+        try:
+            if self.ws:
+                self.ws.close()
+        except Exception:
+            pass
+
+    def _send_session_update(self):
+        self.ws.send(
+            json.dumps(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "audio": {
+                            "output": {
+                                "language": language_code(self.target_language),
+                            },
+                        },
+                    },
+                }
+            )
+        )
+
+    def _send_audio(self):
+        try:
+            self.audio = pyaudio.PyAudio()
+            self.stream = self.audio.open(
+                format=self.FORMAT,
+                channels=self.CHANNELS,
+                rate=self.RATE,
+                input=True,
+                frames_per_buffer=self.CHUNK,
+            )
+
+            while self.running:
+                data = self.stream.read(self.CHUNK, exception_on_overflow=False)
+                self.ws.send(
+                    json.dumps(
+                        {
+                            "type": "session.input_audio_buffer.append",
+                            "audio": base64.b64encode(data).decode("ascii"),
+                        }
+                    )
+                )
+        except Exception as e:
+            if self.running and self.status_callback:
+                self.status_callback(f"Realtime audio error: {e}")
+            self.stop()
+
+    def _receive_events(self):
+        try:
+            while self.running:
+                raw_event = self.ws.recv()
+                if not raw_event:
+                    continue
+                event = json.loads(raw_event)
+                event_type = event.get("type")
+
+                if event_type == "session.output_transcript.delta":
+                    self.ui_delta_updater("", event.get("delta", ""))
+                elif event_type == "session.input_transcript.delta":
+                    delta = event.get("delta", "")
+                    self.ui_delta_updater(delta, "")
+                    self._record_source_delta(delta)
+                elif event_type == "error":
+                    message = event.get("error", {}).get("message", event)
+                    if self.status_callback:
+                        self.status_callback(f"Realtime API error: {message}")
+        except Exception as e:
+            if self.running and self.status_callback:
+                self.status_callback(f"Realtime receive error: {e}")
+        finally:
+            self.stop()
+
+    def _record_source_delta(self, delta):
+        if not delta:
+            return
+
+        with self.source_lock:
+            self.source_buffer += delta
+            should_flush = (
+                len(self.source_buffer) >= 240
+                or self.source_buffer.rstrip().endswith((".", "!", "?", "\n"))
+            )
+            if should_flush:
+                text = self.source_buffer.strip()
+                self.source_buffer = ""
+                if text:
+                    self.add_transcription(datetime.datetime.now(), text)
 
 class AudioRecorder:
     """Handles audio recording and processing."""
@@ -50,6 +263,13 @@ class AudioRecorder:
         """Start audio recording and processing."""
         if self.is_recording:
             return
+
+        if self.config_manager.get_translation_backend() == OPENAI_REALTIME_BACKEND:
+            self.config_manager.transcription_manager.start_realtime_translation(self.status_callback)
+            self.is_recording = True
+            if self.status_callback:
+                self.status_callback("Recording with OpenAI realtime translation")
+            return
             
         self.is_recording = True
         self.stop_event.clear()
@@ -75,6 +295,9 @@ class AudioRecorder:
         self.is_recording = False
         self.stop_event.set()
         self.audio_data_available.set()  # Wake up waiting threads
+
+        if self.config_manager.get_translation_backend() == OPENAI_REALTIME_BACKEND:
+            self.config_manager.transcription_manager.stop_realtime_translation()
         
         if self.status_callback:
             self.status_callback("Recording stopped")
@@ -171,7 +394,7 @@ class AudioRecorder:
 class TranscriptionManager:
     """Manages audio transcription and text processing."""
     
-    def __init__(self, config_manager, ui_updater):
+    def __init__(self, config_manager, ui_updater, realtime_ui_updater=None):
         """Initialize the transcription manager.
         
         Args:
@@ -180,10 +403,13 @@ class TranscriptionManager:
         """
         self.config_manager = config_manager
         self.ui_updater = ui_updater
+        self.realtime_ui_updater = realtime_ui_updater
         self.transcription_texts = []
         self.transcription_lock = threading.Lock()
         self.groq_client = None
+        self.openai_client = None
         self.anthropic_client = None
+        self.realtime_translation_session = None
         self._initialize_clients()
         
     def _initialize_clients(self):
@@ -196,6 +422,14 @@ class TranscriptionManager:
                 print("Groq API Key successfully retrieved")
             else:
                 print("Groq API Key not found. Some features may not work.")
+
+            # Initialize OpenAI client
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            if openai_api_key:
+                self.openai_client = OpenAI(api_key=openai_api_key)
+                print("OpenAI API Key successfully retrieved")
+            else:
+                print("OpenAI API Key not found. OpenAI translation backends may not work.")
                 
             # Initialize Anthropic client
             anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
@@ -206,6 +440,30 @@ class TranscriptionManager:
                 print("Anthropic API Key not found. Suggestion features may not work.")
         except Exception as e:
             print(f"Error initializing API clients: {e}")
+
+    def start_realtime_translation(self, status_callback=None):
+        """Start a dedicated OpenAI realtime translation session."""
+        if self.realtime_translation_session:
+            return
+        if not self.realtime_ui_updater:
+            raise RuntimeError("Realtime UI updater is not initialized")
+        if not os.getenv('OPENAI_API_KEY'):
+            raise RuntimeError("OPENAI_API_KEY is required for OpenAI realtime translation")
+
+        self.realtime_translation_session = RealtimeTranslationSession(
+            api_key=os.getenv('OPENAI_API_KEY'),
+            target_language=self.config_manager.get_translation_language(),
+            ui_delta_updater=self.realtime_ui_updater,
+            add_transcription=self.add_transcription,
+            status_callback=status_callback,
+        )
+        self.realtime_translation_session.start()
+
+    def stop_realtime_translation(self):
+        """Stop the active OpenAI realtime translation session."""
+        if self.realtime_translation_session:
+            self.realtime_translation_session.stop()
+            self.realtime_translation_session = None
 
     def add_transcription(self, timestamp, text):
         """Add a transcription to history with thread safety.
@@ -228,7 +486,10 @@ class TranscriptionManager:
             timestamp: The timestamp of the recording
         """
         try:
-            if not self.groq_client:
+            if self.config_manager.get_translation_backend() == OPENAI_CHUNKED_BACKEND:
+                if not self.openai_client:
+                    raise Exception("OpenAI client not initialized")
+            elif not self.groq_client:
                 raise Exception("Groq client not initialized")
                 
             # Use threading to avoid blocking
@@ -250,7 +511,10 @@ class TranscriptionManager:
             timestamp: The timestamp of the transcription request
         """
         try:
-            if not self.groq_client:
+            if self.config_manager.get_translation_backend() == OPENAI_CHUNKED_BACKEND:
+                if not self.openai_client:
+                    raise Exception("OpenAI client not initialized")
+            elif not self.groq_client:
                 raise Exception("Groq client not initialized")
                 
             threading.Thread(
@@ -270,16 +534,7 @@ class TranscriptionManager:
             timestamp: The timestamp of the recording
         """
         try:
-            # Call API with retry logic
-            transcription = self._call_with_retry(
-                lambda: self.groq_client.audio.transcriptions.create(
-                    file=("audio.wav", audio_buffer),
-                    model="whisper-large-v3",
-                    response_format="verbose_json"
-                )
-            )
-            
-            transcription_text = transcription.text
+            transcription_text = self.transcribe_audio_buffer(audio_buffer, "audio.wav")
             
             # Translate the transcription
             translated_text = self.translate_text(transcription_text)
@@ -315,15 +570,7 @@ class TranscriptionManager:
             timestamp: The timestamp of the transcription request
         """
         try:
-            transcription = self._call_with_retry(
-                lambda: self.groq_client.audio.transcriptions.create(
-                    file=(file_path, file_data),
-                    model="whisper-large-v3",
-                    response_format="verbose_json"
-                )
-            )
-            
-            transcription_text = transcription.text
+            transcription_text = self.transcribe_audio_buffer(io.BytesIO(file_data), os.path.basename(file_path))
             
             # Save transcription to file
             with open("transcription_from_file.txt", "w", encoding='utf-8') as f:
@@ -342,6 +589,31 @@ class TranscriptionManager:
             print(f"Error transcribing file: {e}")
             self.ui_updater(f"Error: {e}", "", "", timestamp)
 
+    def transcribe_audio_buffer(self, audio_buffer, filename):
+        """Transcribe an audio buffer with the selected provider."""
+        backend = self.config_manager.get_translation_backend()
+        audio_buffer.seek(0)
+
+        if backend == OPENAI_CHUNKED_BACKEND:
+            audio_buffer.name = filename
+            transcription = self._call_with_retry(
+                lambda: self.openai_client.audio.transcriptions.create(
+                    file=audio_buffer,
+                    model="gpt-4o-transcribe",
+                    response_format="json",
+                )
+            )
+            return extract_text(transcription)
+
+        transcription = self._call_with_retry(
+            lambda: self.groq_client.audio.transcriptions.create(
+                file=(filename, audio_buffer),
+                model="whisper-large-v3",
+                response_format="verbose_json"
+            )
+        )
+        return extract_text(transcription)
+
     def translate_text(self, text):
         """Translate text to the target language.
         
@@ -356,11 +628,34 @@ class TranscriptionManager:
             
         try:
             target_language = self.config_manager.get_translation_language()
+            backend = self.config_manager.get_translation_backend()
+
+            if backend == OPENAI_CHUNKED_BACKEND:
+                if not self.openai_client:
+                    raise Exception("OpenAI client not initialized")
+
+                completion = self._call_with_retry(
+                    lambda: self.openai_client.chat.completions.create(
+                        model="gpt-4.1-mini",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": f"You are a precise translator. Translate the user's text to {target_language}. Return only the translation. If the text is already in {target_language}, return it unchanged."
+                            },
+                            {
+                                "role": "user",
+                                "content": text
+                            }
+                        ],
+                        temperature=0.2,
+                    )
+                )
+                return completion.choices[0].message.content.strip()
             
             # Call API with retry logic
             completion = self._call_with_retry(
                 lambda: self.groq_client.chat.completions.create(
-                    model="llama3-70b-8192",
+                    model="llama-3.3-70b-versatile",
                     messages=[
                         {
                             "role": "system",
@@ -421,7 +716,7 @@ class TranscriptionManager:
             # Call API with retry logic
             message = self._call_with_retry(
                 lambda: self.anthropic_client.messages.create(
-                    model="claude-3-5-sonnet-20240620",
+                    model="claude-sonnet-4-6",
                     max_tokens=4000,
                     temperature=0.2,
                     system=system_prompt,
@@ -434,8 +729,9 @@ class TranscriptionManager:
                 )
             )
             
-            print(f"Claude Sonnet Response (Suggestions): {message.content}")
-            return message.content
+            result = extract_anthropic_text(message)
+            print(f"Claude Sonnet Response (Suggestions): {result}")
+            return result
             
         except Exception as e:
             print(f"Error processing with Claude Sonnet: {e}")
@@ -460,7 +756,7 @@ class TranscriptionManager:
             # Call API with retry logic
             message = self._call_with_retry(
                 lambda: self.anthropic_client.messages.create(
-                    model="claude-3-5-sonnet-20240620",
+                    model="claude-sonnet-4-6",
                     max_tokens=4000,
                     temperature=0.1,
                     system=system_prompt,
@@ -473,8 +769,9 @@ class TranscriptionManager:
                 )
             )
             
-            print(f"Sonnet Transliteration Response ({target_language}): {message.content}")
-            return message.content
+            result = extract_anthropic_text(message)
+            print(f"Sonnet Transliteration Response ({target_language}): {result}")
+            return result
             
         except Exception as e:
             print(f"Error processing Sonnet response: {e}")
@@ -565,6 +862,7 @@ class ConfigManager:
     
     DEFAULT_CONFIG = {
         'recording_period': 5,
+        'translation_backend': LEGACY_GROQ_BACKEND,
         'transliteration_language': 'Russian',
         'translation_language': 'English',
         'auto_scroll': True,
@@ -639,6 +937,17 @@ class ConfigManager:
     def set_translation_language(self, language):
         """Set the target translation language."""
         self.config['translation_language'] = language
+
+    def get_translation_backend(self):
+        """Get the selected transcription/translation backend."""
+        backend = self.config.get('translation_backend', LEGACY_GROQ_BACKEND)
+        allowed = {LEGACY_GROQ_BACKEND, OPENAI_CHUNKED_BACKEND, OPENAI_REALTIME_BACKEND}
+        return backend if backend in allowed else LEGACY_GROQ_BACKEND
+
+    def set_translation_backend(self, backend):
+        """Set the selected transcription/translation backend."""
+        allowed = {LEGACY_GROQ_BACKEND, OPENAI_CHUNKED_BACKEND, OPENAI_REALTIME_BACKEND}
+        self.config['translation_backend'] = backend if backend in allowed else LEGACY_GROQ_BACKEND
         
     def get_transliteration_language(self):
         """Get the target transliteration language."""
@@ -748,6 +1057,7 @@ class UIManager:
         self.timestamp_mode_var = tk.BooleanVar(value=self.config_manager.get_timestamp_mode())
         self.transliteration_language_var = tk.StringVar(value=self.config_manager.get_transliteration_language())
         self.translation_language_var = tk.StringVar(value=self.config_manager.get_translation_language())
+        self.translation_backend_var = tk.StringVar(value=self.config_manager.get_translation_backend())
         
         # Dictionary to store personal info entries
         self.personal_info_entries = {}
@@ -918,8 +1228,22 @@ class UIManager:
         show_suggestions_checkbox.grid(row=2, column=1, padx=5, pady=5, sticky="w")
         
         # Language selections
+        backend_label = tk.Label(self.controls_frame, text="Translation Backend:", font=("Helvetica", 12))
+        backend_label.grid(row=3, column=0, padx=5, pady=5, sticky="w")
+
+        backend_dropdown = ttk.Combobox(
+            self.controls_frame,
+            textvariable=self.translation_backend_var,
+            values=[LEGACY_GROQ_BACKEND, OPENAI_CHUNKED_BACKEND, OPENAI_REALTIME_BACKEND],
+            state="readonly",
+            width=36,
+        )
+        backend_dropdown.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        backend_dropdown.bind("<<ComboboxSelected>>",
+                              lambda e: self.config_manager.set_translation_backend(self.translation_backend_var.get()))
+
         translit_label = tk.Label(self.controls_frame, text="Transliteration Language:", font=("Helvetica", 12))
-        translit_label.grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        translit_label.grid(row=4, column=0, padx=5, pady=5, sticky="w")
         
         translit_options = ['Russian', 'Spanish', 'French', 'German', 'Chinese', 'Japanese', 'Korean', 'Arabic']
         translit_dropdown = ttk.Combobox(
@@ -928,12 +1252,12 @@ class UIManager:
             values=translit_options,
             state="readonly"
         )
-        translit_dropdown.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        translit_dropdown.grid(row=4, column=1, padx=5, pady=5, sticky="w")
         translit_dropdown.bind("<<ComboboxSelected>>", 
                                lambda e: self.config_manager.set_transliteration_language(self.transliteration_language_var.get()))
         
         translation_label = tk.Label(self.controls_frame, text="Translate To:", font=("Helvetica", 12))
-        translation_label.grid(row=4, column=0, padx=5, pady=5, sticky="w")
+        translation_label.grid(row=5, column=0, padx=5, pady=5, sticky="w")
         
         translation_options = ['English', 'Spanish', 'French', 'German', 'Chinese', 'Japanese', 'Korean', 'Arabic']
         translation_dropdown = ttk.Combobox(
@@ -942,49 +1266,49 @@ class UIManager:
             values=translation_options,
             state="readonly"
         )
-        translation_dropdown.grid(row=4, column=1, padx=5, pady=5, sticky="w")
+        translation_dropdown.grid(row=5, column=1, padx=5, pady=5, sticky="w")
         translation_dropdown.bind("<<ComboboxSelected>>", 
                                   lambda e: self.config_manager.set_translation_language(self.translation_language_var.get()))
         
         # Personal information section
         personal_info_label = tk.Label(self.controls_frame, text="Personal Info:", font=("Helvetica", 12, "bold"))
-        personal_info_label.grid(row=5, column=0, padx=5, pady=(15, 5), columnspan=2)
+        personal_info_label.grid(row=6, column=0, padx=5, pady=(15, 5), columnspan=2)
         
         # Name field
         name_label = tk.Label(self.controls_frame, text="Name:", font=("Helvetica", 12))
-        name_label.grid(row=6, column=0, padx=5, pady=5, sticky="w")
+        name_label.grid(row=7, column=0, padx=5, pady=5, sticky="w")
         name_entry = tk.Entry(self.controls_frame, font=("Helvetica", 12))
-        name_entry.grid(row=6, column=1, padx=5, pady=5, sticky="ew")
+        name_entry.grid(row=7, column=1, padx=5, pady=5, sticky="ew")
         name_entry.insert(0, self.config_manager.get_personal_info().get('name', ''))
         self.personal_info_entries['name'] = name_entry
         
         # Goal field
         goal_label = tk.Label(self.controls_frame, text="Conversation Goal:", font=("Helvetica", 12))
-        goal_label.grid(row=7, column=0, padx=5, pady=5, sticky="w")
+        goal_label.grid(row=8, column=0, padx=5, pady=5, sticky="w")
         goal_entry = tk.Entry(self.controls_frame, font=("Helvetica", 12))
-        goal_entry.grid(row=7, column=1, padx=5, pady=5, sticky="ew")
+        goal_entry.grid(row=8, column=1, padx=5, pady=5, sticky="ew")
         goal_entry.insert(0, self.config_manager.get_personal_info().get('goal', ''))
         self.personal_info_entries['goal'] = goal_entry
         
         # Style field
         style_label = tk.Label(self.controls_frame, text="Preferred Style:", font=("Helvetica", 12))
-        style_label.grid(row=8, column=0, padx=5, pady=5, sticky="w")
+        style_label.grid(row=9, column=0, padx=5, pady=5, sticky="w")
         style_entry = tk.Entry(self.controls_frame, font=("Helvetica", 12))
-        style_entry.grid(row=8, column=1, padx=5, pady=5, sticky="ew")
+        style_entry.grid(row=9, column=1, padx=5, pady=5, sticky="ew")
         style_entry.insert(0, self.config_manager.get_personal_info().get('style', ''))
         self.personal_info_entries['style'] = style_entry
         
         # Length field
         length_label = tk.Label(self.controls_frame, text="Preferred Length:", font=("Helvetica", 12))
-        length_label.grid(row=9, column=0, padx=5, pady=5, sticky="w")
+        length_label.grid(row=10, column=0, padx=5, pady=5, sticky="w")
         length_entry = tk.Entry(self.controls_frame, font=("Helvetica", 12))
-        length_entry.grid(row=9, column=1, padx=5, pady=5, sticky="ew")
+        length_entry.grid(row=10, column=1, padx=5, pady=5, sticky="ew")
         length_entry.insert(0, self.config_manager.get_personal_info().get('length', ''))
         self.personal_info_entries['length'] = length_entry
         
         # Add profile management UI
         profile_frame = tk.Frame(self.controls_frame)
-        profile_frame.grid(row=10, column=0, columnspan=2, padx=5, pady=10)
+        profile_frame.grid(row=11, column=0, columnspan=2, padx=5, pady=10)
         
         profile_label = tk.Label(profile_frame, text="Profile:", font=("Helvetica", 12))
         profile_label.pack(side=tk.LEFT, padx=5)
@@ -1018,7 +1342,7 @@ class UIManager:
         
         # Buttons frame for actions
         button_frame = tk.Frame(self.controls_frame)
-        button_frame.grid(row=11, column=0, columnspan=2, padx=5, pady=10)
+        button_frame.grid(row=12, column=0, columnspan=2, padx=5, pady=10)
         
         transcribe_button = tk.Button(button_frame, text="Transcribe File", command=self.transcribe_file)
         transcribe_button.pack(side=tk.LEFT, padx=5)
@@ -1092,6 +1416,10 @@ class UIManager:
             suggestion_text: The suggestion text (if any)
             timestamp: The timestamp of the transcription
         """
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(0, self.update_gui, original_text, translated_text, suggestion_text, timestamp)
+            return
+
         if timestamp:
             formatted_timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S")
             timestamp_text = f"[{formatted_timestamp}] "
@@ -1121,6 +1449,26 @@ class UIManager:
             if self.auto_scroll_var.get():
                 self.result_text3.see(tk.END)
             self.result_text3.config(state=tk.DISABLED)
+
+    def append_realtime_text(self, original_delta="", translated_delta=""):
+        """Append realtime transcript deltas from background WebSocket threads."""
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(0, self.append_realtime_text, original_delta, translated_delta)
+            return
+
+        if original_delta and self.config_manager.get_show_original():
+            self.result_text1.config(state=tk.NORMAL)
+            self.result_text1.insert(tk.END, original_delta)
+            if self.auto_scroll_var.get():
+                self.result_text1.see(tk.END)
+            self.result_text1.config(state=tk.DISABLED)
+
+        if translated_delta:
+            self.result_text2.config(state=tk.NORMAL)
+            self.result_text2.insert(tk.END, translated_delta)
+            if self.auto_scroll_var.get():
+                self.result_text2.see(tk.END)
+            self.result_text2.config(state=tk.DISABLED)
             
     def update_suggestion_box(self, suggestion_text):
         """Update only the suggestion box with new text.
@@ -1160,6 +1508,10 @@ class UIManager:
             status_text: The status text to display
             color: Text color
         """
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(0, self.update_status, status_text, color)
+            return
+
         self.status_label.config(text=status_text, fg=color)
         self.root.update_idletasks()
         
@@ -1188,7 +1540,12 @@ class UIManager:
         self.save_personal_info()
         
         # Start the audio recorder
-        self.audio_recorder.start_recording()
+        try:
+            self.audio_recorder.start_recording()
+        except Exception as e:
+            self.is_recording = False
+            self.record_button.config(text="Start Recording", bg="SystemButtonFace")
+            self.update_status(f"Recording failed: {e}", "red")
         
     def stop_recording(self):
         """Stop audio recording."""
@@ -1250,6 +1607,10 @@ class UIManager:
             
     def save_settings(self):
         """Save current settings to the configuration file."""
+        self.config_manager.set_translation_backend(self.translation_backend_var.get())
+        self.config_manager.set_translation_language(self.translation_language_var.get())
+        self.config_manager.set_transliteration_language(self.transliteration_language_var.get())
+
         # First update personal info
         self.save_personal_info()
         
@@ -1303,6 +1664,7 @@ class UIManager:
             self.timestamp_mode_var.set(self.config_manager.get_timestamp_mode())
             self.transliteration_language_var.set(self.config_manager.get_transliteration_language())
             self.translation_language_var.set(self.config_manager.get_translation_language())
+            self.translation_backend_var.set(self.config_manager.get_translation_backend())
             
             # Update personal info fields
             personal_info = self.config_manager.get_personal_info()
@@ -1337,13 +1699,11 @@ class UIManager:
 def main():
     """Main application entry point."""
     # Load environment variables
-    load_dotenv()
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
     
-    # Check required environment variables
-    if not os.getenv('GROQ_API_KEY') and not os.getenv('ANTHROPIC_API_KEY'):
-        print("Neither GROQ_API_KEY nor ANTHROPIC_API_KEY found in environment variables.")
-        print("Please set at least one of these in your .env file.")
-        sys.exit(1)
+    # Missing keys are handled feature-by-feature so the GUI can still launch.
+    if not any(os.getenv(key) for key in ('GROQ_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY')):
+        print("No API keys found. Add keys to .env before using transcription, translation, or suggestions.")
     
     # Create the main window
     root = tk.Tk()
@@ -1357,7 +1717,8 @@ def main():
     # Create transcription manager with UI update callback
     transcription_manager = TranscriptionManager(
         config_manager,
-        ui_manager.update_gui
+        ui_manager.update_gui,
+        ui_manager.append_realtime_text
     )
     
     # Link managers

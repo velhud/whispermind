@@ -2,3 +2,5 @@ pyaudio
 groq
 python-dotenv
 anthropic
+openai
+websocket-client
