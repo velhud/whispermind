@@ -1,6 +1,6 @@
 # WhisperMind
 
-WhisperMind is a local Tkinter app for live microphone transcription, translation, and conversation suggestions.
+WhisperMind is a local app for live microphone transcription, translation, and conversation suggestions. The Tkinter UI is the reference desktop UI; the JS UI in `whispermindjs/` mirrors the same backend modes through a local React + Express/Socket.IO app.
 
 ## Launch
 
@@ -9,7 +9,7 @@ python3 -m pip install -r requirements.txt
 python3 whispermind.py
 ```
 
-The experimental JS UI lives in `whispermindjs/` and mirrors the current Tk backend modes. See `whispermindjs/README.md` for launch steps.
+The JS UI lives in `whispermindjs/` and mirrors the current Tk backend modes. See `whispermindjs/README.md` for install, launch, persistent LaunchAgent, and browser smoke-test steps.
 
 If PyAudio fails on macOS, install PortAudio first and rebuild PyAudio:
 
@@ -29,7 +29,24 @@ ANTHROPIC_API_KEY=your_anthropic_api_key
 OPENAI_API_KEY=your_openai_api_key
 ```
 
-The app launches without every key, but each backend needs its own key.
+The app launches without every key, but each backend needs its own key:
+
+- `GROQ_API_KEY`: required for `Legacy Groq Whisper + Groq Translate`.
+- `ANTHROPIC_API_KEY`: required for conversation suggestions and transliteration.
+- `OPENAI_API_KEY`: required for both OpenAI chunked and OpenAI realtime modes.
+
+The JS server exposes key availability at `/api/health`, for example:
+
+```json
+{
+  "ok": true,
+  "providers": {
+    "groq": true,
+    "openai": false,
+    "anthropic": true
+  }
+}
+```
 
 ## Translation Backends
 
@@ -56,6 +73,7 @@ OpenAI realtime translation requires `OPENAI_API_KEY` and streams 24 kHz mono PC
 
 - The old Groq translation model was decommissioned; this version uses `llama-3.3-70b-versatile`.
 - The old Anthropic Sonnet model was unavailable for the configured key; this version uses `claude-sonnet-4-6`.
+- If `OPENAI_API_KEY` is missing, OpenAI modes fail clearly in the UI instead of silently recording against the wrong backend.
 - OpenAI official docs used for the integration:
   - https://developers.openai.com/api/docs/guides/speech-to-text
   - https://developers.openai.com/api/docs/guides/realtime-transcription
