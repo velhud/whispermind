@@ -9,6 +9,8 @@ python3 -m pip install -r requirements.txt
 python3 whispermind.py
 ```
 
+The experimental JS UI lives in `whispermindjs/` and mirrors the current Tk backend modes. See `whispermindjs/README.md` for launch steps.
+
 If PyAudio fails on macOS, install PortAudio first and rebuild PyAudio:
 
 ```bash

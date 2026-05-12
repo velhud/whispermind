@@ -5,3 +5,8 @@ __pycache__/
 transcriptions.txt
 settings.json
 transcription_from_file.txt
+node_modules/
+build/
+whispermindjs/server/config.json
+whispermindjs/server/.env
+whispermindjs/client/.env

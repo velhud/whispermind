@@ -1,0 +1,63 @@
+.app-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 6px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.title-stack {
+  min-width: 0;
+}
+
+.app-title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.backend-label {
+  margin-top: 2px;
+  color: var(--muted-text);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.record-button {
+  min-width: 140px;
+  background: var(--primary-color);
+  color: #fff;
+  border-color: var(--primary-color);
+}
+
+.record-button:hover {
+  background: var(--primary-dark);
+}
+
+.record-button.recording {
+  background: var(--error-color);
+  border-color: var(--error-color);
+}
+
+.settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-text);
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .app-header {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .record-button {
+    width: 100%;
+  }
+}

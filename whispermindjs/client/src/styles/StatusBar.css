@@ -1,0 +1,26 @@
+.status-bar {
+  padding: 7px 12px;
+  font-size: 13px;
+  background: var(--soft-bg);
+  border-top: 1px solid var(--border-color);
+}
+
+.status-bar.success {
+  background: rgba(38, 122, 62, 0.12);
+  color: var(--success-color);
+}
+
+.status-bar.error {
+  background: rgba(180, 35, 24, 0.12);
+  color: var(--error-color);
+}
+
+.status-bar.warning {
+  background: rgba(148, 98, 0, 0.13);
+  color: var(--warning-color);
+}
+
+.status-bar.info {
+  background: rgba(31, 95, 153, 0.12);
+  color: var(--info-color);
+}

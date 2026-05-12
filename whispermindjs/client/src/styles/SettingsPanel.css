@@ -1,0 +1,65 @@
+.settings-panel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 12px 8px;
+  background: #f7f7f7;
+  border-top: 1px solid var(--border-color);
+}
+
+.settings-section {
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--panel-bg);
+}
+
+.settings-section legend {
+  padding: 0 5px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.setting-item {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+  color: var(--muted-text);
+  font-size: 13px;
+}
+
+.setting-item input,
+.setting-item select {
+  width: 100%;
+}
+
+.check-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 12px 4px 0;
+  color: var(--muted-text);
+  font-size: 13px;
+}
+
+.inline-checks {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.backend-section .setting-item {
+  grid-template-columns: 90px minmax(0, 1fr);
+}
+
+.assistant-section .setting-item {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+@media (max-width: 980px) {
+  .settings-panel {
+    grid-template-columns: 1fr;
+  }
+}

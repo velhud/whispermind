@@ -1,0 +1,78 @@
+:root {
+  --primary-color: #2f6fb5;
+  --primary-dark: #25598f;
+  --panel-bg: #ffffff;
+  --soft-bg: #f4f6f8;
+  --text-color: #222;
+  --muted-text: #555;
+  --border-color: #d4d9df;
+  --success-color: #267a3e;
+  --error-color: #b42318;
+  --warning-color: #946200;
+  --info-color: #1f5f99;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--text-color);
+  background: #f7f7f7;
+  font-family: Helvetica, Arial, sans-serif;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  padding: 7px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--panel-bg);
+}
+
+button:hover {
+  background: var(--soft-bg);
+}
+
+button:disabled,
+input:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+input,
+select {
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--panel-bg);
+}
+
+.app-container {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+.app-loading {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  background: var(--soft-bg);
+}
+
+@media (max-width: 900px) {
+  .app-container {
+    overflow: auto;
+  }
+}
