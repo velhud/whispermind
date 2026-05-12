@@ -37,6 +37,10 @@ const transcriptionService = {
   fileWorkerBusy: false,
 
   initialize() {
+    this.groqClient = null;
+    this.openaiClient = null;
+    this.anthropicClient = null;
+
     if (process.env.GROQ_API_KEY) {
       this.groqClient = new Groq({ apiKey: process.env.GROQ_API_KEY });
       console.log('Groq API key loaded.');
@@ -61,6 +65,14 @@ const transcriptionService = {
 
   clearHistory() {
     this.transcriptionHistory = [];
+  },
+
+  providerStatus() {
+    return {
+      groq: Boolean(this.groqClient),
+      openai: Boolean(this.openaiClient),
+      anthropic: Boolean(this.anthropicClient),
+    };
   },
 
   addToHistory(timestamp, text) {
@@ -182,40 +194,49 @@ const transcriptionService = {
 
   async generateSuggestions() {
     const now = new Date();
-    if (!this.anthropicClient) {
+    try {
+      if (!this.anthropicClient) {
+        return {
+          suggestions: 'Claude API not initialized. Check your API key.',
+          originalSuggestions: '',
+          timestamp: now.toISOString(),
+          ok: false,
+        };
+      }
+
+      const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
+      const recentTexts = this.transcriptionHistory
+        .filter((item) => item.timestamp >= fiveMinutesAgo)
+        .map((item) => item.text);
+
+      if (recentTexts.length === 0) {
+        return {
+          suggestions: 'No recent conversation to generate suggestions from.',
+          originalSuggestions: '',
+          timestamp: now.toISOString(),
+          ok: false,
+        };
+      }
+
+      const aggregatedText = recentTexts.join(' ');
+      const originalSuggestions = await this._processWithClaudeSonnet(aggregatedText);
+      const processedSuggestions = await this._processTransliteration(originalSuggestions);
+      const formatted = `[${formatTimestamp(now)}] ${processedSuggestions}`;
+
       return {
-        suggestions: 'Claude API not initialized. Check your API key.',
+        suggestions: formatted,
+        originalSuggestions,
+        timestamp: now.toISOString(),
+        ok: true,
+      };
+    } catch (error) {
+      return {
+        suggestions: `Error generating suggestions: ${error.message || error}`,
         originalSuggestions: '',
         timestamp: now.toISOString(),
         ok: false,
       };
     }
-
-    const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
-    const recentTexts = this.transcriptionHistory
-      .filter((item) => item.timestamp >= fiveMinutesAgo)
-      .map((item) => item.text);
-
-    if (recentTexts.length === 0) {
-      return {
-        suggestions: 'No recent conversation to generate suggestions from.',
-        originalSuggestions: '',
-        timestamp: now.toISOString(),
-        ok: false,
-      };
-    }
-
-    const aggregatedText = recentTexts.join(' ');
-    const originalSuggestions = await this._processWithClaudeSonnet(aggregatedText);
-    const processedSuggestions = await this._processTransliteration(originalSuggestions);
-    const formatted = `[${formatTimestamp(now)}] ${processedSuggestions}`;
-
-    return {
-      suggestions: formatted,
-      originalSuggestions,
-      timestamp: now.toISOString(),
-      ok: true,
-    };
   },
 
   async _processWithClaudeSonnet(text) {

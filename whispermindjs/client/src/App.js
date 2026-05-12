@@ -17,6 +17,7 @@ function socketUrl() {
 
 const App = () => {
   const socketRef = useRef(null);
+  const configRef = useRef(null);
   const [isRecording, setIsRecording] = useState(false);
   const [showSettings, setShowSettings] = useState(true);
   const [config, setConfig] = useState(null);
@@ -60,6 +61,7 @@ const App = () => {
       try {
         const configData = await configService.getConfig();
         if (!mounted) return;
+        configRef.current = configData;
         setConfig(configData);
 
         const socketInstance = io(socketUrl(), {
@@ -68,8 +70,18 @@ const App = () => {
         socketRef.current = socketInstance;
 
         socketInstance.on('connect', () => setStatus({ message: 'Ready', type: 'success' }));
-        socketInstance.on('disconnect', () => setStatus({ message: 'Disconnected from backend', type: 'warning' }));
-        socketInstance.on('status', (statusData) => setStatus(statusData));
+        socketInstance.on('disconnect', () => {
+          audioService.stopRecording();
+          setIsRecording(false);
+          setStatus({ message: 'Disconnected from backend', type: 'warning' });
+        });
+        socketInstance.on('status', (statusData) => {
+          if (statusData.type === 'error' && String(statusData.message || '').startsWith('Recording failed')) {
+            audioService.stopRecording();
+            setIsRecording(false);
+          }
+          setStatus(statusData);
+        });
         socketInstance.on('transcriptionResult', (result) => {
           appendOriginal(result.original, result.timestamp);
           appendTranslated(result.translated, result.timestamp);
@@ -96,7 +108,7 @@ const App = () => {
   const startRecording = useCallback(async () => {
     try {
       if (!socketRef.current) throw new Error('Socket not connected');
-      await audioService.startRecording(socketRef.current, config);
+      await audioService.startRecording(socketRef.current, configRef.current || config);
       setIsRecording(true);
       setStatus({ message: 'Recording...', type: 'success' });
     } catch (error) {
@@ -145,9 +157,13 @@ const App = () => {
   }, [config]);
 
   const handleConfigChange = useCallback(async (newConfig) => {
+    configRef.current = newConfig;
+    setConfig(newConfig);
     try {
       const result = await configService.updateConfig(newConfig);
-      setConfig(result.config || newConfig);
+      const savedConfig = result.config || newConfig;
+      configRef.current = savedConfig;
+      setConfig(savedConfig);
       setStatus({ message: 'Settings updated', type: 'success' });
     } catch (error) {
       setStatus({ message: `Error updating config: ${error.message || error.error || error}`, type: 'error' });

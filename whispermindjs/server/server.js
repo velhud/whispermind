@@ -7,7 +7,10 @@ const path = require('path');
 const multer = require('multer');
 
 // Load environment variables before provider services are imported.
-dotenv.config();
+// The JS UI can use its own server/.env, but also falls back to the project root
+// .env used by the Tk app so both UIs share local credentials by default.
+dotenv.config({ path: path.join(__dirname, '..', '..', '.env') });
+dotenv.config({ path: path.join(__dirname, '.env'), override: true });
 
 const { recordingController } = require('./controllers/recordingController');
 const { transcriptionController } = require('./controllers/transcriptionController');
@@ -29,7 +32,9 @@ const corsOptions = {
       callback(null, true);
       return;
     }
-    callback(new Error(`Origin not allowed: ${origin}`));
+    const error = new Error(`Origin not allowed: ${origin}`);
+    error.status = 403;
+    callback(error);
   },
 };
 
@@ -55,7 +60,9 @@ const upload = multer({
   },
   fileFilter(req, file, callback) {
     if (!file.mimetype.startsWith('audio/')) {
-      callback(new Error('Only audio uploads are supported'));
+      const error = new Error('Only audio uploads are supported');
+      error.status = 400;
+      callback(error);
       return;
     }
     callback(null, true);
@@ -68,16 +75,28 @@ io.on('connection', (socket) => {
   
   // Handle audio data streaming
   socket.on('audioData', (data) => {
-    recordingController.processAudioChunk(data, socket);
+    try {
+      recordingController.processAudioChunk(data, socket);
+    } catch (error) {
+      socket.emit('status', { message: `Audio error: ${error.message}`, type: 'error' });
+    }
   });
   
   // Handle recording start/stop
-  socket.on('startRecording', () => {
-    recordingController.startRecording(socket);
+  socket.on('startRecording', (options = {}) => {
+    try {
+      recordingController.startRecording(socket, options);
+    } catch (error) {
+      socket.emit('status', { message: `Recording failed: ${error.message}`, type: 'error' });
+    }
   });
-  
+
   socket.on('stopRecording', () => {
-    recordingController.stopRecording(socket);
+    try {
+      recordingController.stopRecording(socket);
+    } catch (error) {
+      socket.emit('status', { message: `Stop failed: ${error.message}`, type: 'error' });
+    }
   });
 
   socket.on('clearHistory', () => {
@@ -94,7 +113,10 @@ io.on('connection', (socket) => {
 
 // API Routes
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    providers: transcriptionService.providerStatus(),
+  });
 });
 app.post('/api/transcribe-file', upload.single('file'), transcriptionController.transcribeFile);
 app.post('/api/generate-suggestions', transcriptionController.generateSuggestions);
@@ -113,11 +135,27 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'client', 'build', 'index.html'));
 });
 
+app.use((error, req, res, next) => {
+  if (res.headersSent) {
+    next(error);
+    return;
+  }
+  if (error instanceof multer.MulterError) {
+    res.status(400).json({ error: error.message || 'Invalid upload' });
+    return;
+  }
+  res.status(error.status || 500).json({ error: error.message || 'Internal server error' });
+});
+
 // Start server
 const PORT = process.env.PORT || 5000;
 async function start() {
   await configService.initialize();
   transcriptionService.initialize();
+  server.on('error', (error) => {
+    console.error('Server error:', error);
+    process.exitCode = 1;
+  });
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`Server running on http://127.0.0.1:${PORT}`);
   });

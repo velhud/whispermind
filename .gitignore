@@ -10,3 +10,5 @@ build/
 whispermindjs/server/config.json
 whispermindjs/server/.env
 whispermindjs/client/.env
+whispermindjs/client/test-results/
+whispermindjs/client/playwright-report/
